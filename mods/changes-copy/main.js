@@ -319,7 +319,9 @@ export default class Changes extends View {
             .when(this.mode === m, (e) => e.bg(t.selected).text_color(t.foreground)).when(this.mode !== m, (e) => e.text_color(t.muted).hover((s) => s.bg(t.hover)))
             .on_click((_e, cx) => this.setMode(m, cx)).child(label))))
         .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
-      .child(v_flex().id("changes-list").flex_none().h(Math.min(tree ? 280 : 200, Math.max(44, rows.length * 28 + 12))).overflow_y_scrollbar().p(6).border_b(1).border_color(t.border).children(rows.map((r) => {
+      // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
+      .child(div().flex_1().min_h(44).max_h(rows.length * 28 + 12).relative().border_b(1).border_color(t.border)
+        .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().p(6).children(rows.map((r) => {
         if (r.dir) return this.dirRow(r, t);
         const f = r.file, parts = tree ? [] : f.path.split("/"), name = tree ? r.name : parts.pop();
         return h_flex().id(`change-${f.path}`).h(28).flex_none().px(8).pl(tree ? 8 + r.depth * 14 + 18 : 8).gap(8).items_center().rounded(7).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
@@ -327,6 +329,7 @@ export default class Changes extends View {
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder")))))
+        .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
         .when(this.mode === "file", (e) => e.child(this.code ? div().id("changes-file-x").size_full().overflow_x_scrollbar()
