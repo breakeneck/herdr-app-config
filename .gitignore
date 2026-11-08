@@ -12,7 +12,9 @@
 !layouts/
 !layouts/my-layout.*
 !mods/
-!mods/my-changes/
-!mods/my-changes/**
+!mods/changes-copy/
+!mods/changes-copy/**
 mods/*/gpui-kit.d.ts
 mods/*/jsconfig.json
+themes/atom-one-dark.json
+themes/win98.json

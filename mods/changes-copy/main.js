@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { highlight, languageFor } from "./highlight.js";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
 
@@ -13,8 +13,22 @@ const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
-const EDITOR_LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
+
+// Which lines of the new file the diff added, and where lines were removed (before that new line).
+function changeMarks(lines) {
+  const added = new Set(), removed = new Map();
+  let next = 0;
+  for (const line of lines) {
+    const match = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(line);
+    if (match) { next = +match[1]; continue; }
+    const kind = line[0];
+    if (kind === "+") added.add(next++);
+    else if (kind === "-") removed.set(next, (removed.get(next) ?? 0) + 1);
+    else if (kind === " ") next++;
+  }
+  return { added, removed };
+}
 
 // Numbers each diff line once, so a frame only draws the rows on screen.
 function diffRows(lines) {
@@ -34,7 +48,7 @@ export default class Changes extends View {
   init(_props, cx) {
     this.files = []; this.rows = []; this.diffWidth = 0; this.mode = "diff"; this.view = "list"; this.collapsed = new Set();
     try { if (localStorage.getItem("view") === "tree") this.view = "tree"; } catch {}
-    this.code = null; this.codePath = null; this.codeError = null; this.message = ""; this.handle = cx.focus_handle();
+    this.code = null; this.codeText = null; this.marks = { added: new Set(), removed: new Map() }; this.fileWidth = 0; this.codePath = null; this.codeError = null; this.message = ""; this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Commit message" });
     this.input.on("change", (_e, cx) => {
       const hadMessage = Boolean(this.message.trim());
@@ -137,9 +151,9 @@ export default class Changes extends View {
     if (key() === context && this.open === path) this.setLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
   }
 
-  releaseCode() { this.code?.release(); this.code = null; this.codePath = null; this.codeError = null; }
+  releaseCode() { this.code = null; this.codeText = null; this.codePath = null; this.codeError = null; }
 
-  // Full file in a read-only Editor. An open editor keeps its scroll: only changed text is replaced.
+  // Full file as lines of a virtual list, with the diff's added/removed lines marked.
   async loadCode(path, context) {
     if (!path) { this.releaseCode(); return; }
     const file = this.files.find((f) => f.path === path);
@@ -151,12 +165,10 @@ export default class Changes extends View {
     if (text === null) { this.releaseCode(); this.codePath = path; this.codeError = "Cannot preview this file (unreadable or too large)"; return; }
     if (text.includes("\0")) { this.releaseCode(); this.codePath = path; this.codeError = "Binary file · no text preview"; return; }
     const value = text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text;
-    if (this.code && this.codePath === path) { if (this.code.value() !== value) this.code.set_value(value); return; }
-    this.releaseCode();
-    const t = theme(), ext = path.includes(".") ? path.split(".").pop().toLowerCase() : "txt";
-    this.code = EditorState.new({ language: EDITOR_LANG[ext] ?? ext, readonly: true, value,
-      font_family: settings().font_family, font_size: 12,
-      syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+    if (this.code && this.codePath === path && this.codeText === value) return;
+    this.codeText = value;
+    this.code = value.replace(/\n$/, "").split("\n");
+    this.fileWidth = Math.max(300, ...this.code.map(line => Math.min(line.length, 600) * 7 + 80));
     this.codePath = path; this.codeError = null;
   }
 
@@ -225,6 +237,7 @@ export default class Changes extends View {
   setLines(lines) {
     this.lang = languageFor(this.open);
     this.rows = diffRows(lines);
+    this.marks = changeMarks(lines);
     this.diffWidth = Math.max(300, ...lines.map(line => line.length * 7 + 50));
   }
 
@@ -263,6 +276,17 @@ export default class Changes extends View {
     return h_flex().w_full().h(20).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
       .child(div().w(30).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
       .child(this.codeCell(text, t));
+  }
+
+  fileRow(i, t) {
+    const n = i + 1, last = i === this.code.length - 1, { added, removed } = this.marks;
+    const before = removed.has(n), after = last && [...removed.keys()].some((k) => k > this.code.length), isAdded = added.has(n);
+    return h_flex().w_full().h(20).flex_none().gap(8)
+      .when(isAdded, (e) => e.bg(t.ansi2 + "18"))
+      .when(before, (e) => e.border_t(2).border_color(t.ansi1)).when(after, (e) => e.border_b(2).border_color(t.ansi1))
+      .child(div().w(3).h_full().flex_none().when(isAdded, (e) => e.bg(t.ansi2)))
+      .child(div().w(34).flex_none().text_right().text_color(t.dim).child(String(n)))
+      .child(this.codeCell(this.code[i] || " ", t));
   }
 
   // Colored spans for one source line; headers and unknown file types stay plain.
@@ -305,8 +329,11 @@ export default class Changes extends View {
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder")))))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
-        .when(this.mode === "file", (e) => e.child(this.code ? Editor.new(this.code).size_full()
+        .when(this.mode === "file", (e) => e.child(this.code ? div().id("changes-file-x").size_full().overflow_x_scrollbar()
+          .child(div().w_full().min_w(this.fileWidth).h_full().child(v_virtual_list("changes-file", this.code.length, 20, (i) => String(i),
+            (range) => Array.from({ length: range.end - range.start }, (_, k) => this.fileRow(range.start + k, t))).size_full()))
           : div().p(12).text_color(t.dim).child(this.open ? (this.codeError || "Loading file…") : "Select a file to view it")))
+        .when(this.mode === "file" && this.code, (e) => e.child(Scrollbar.vertical("changes-file").viewport_from_layout().absolute().inset_0()))
         .when(this.mode !== "file", (e) => e.child(div().id("changes-diff-x").size_full().overflow_x_scrollbar()
           .child(div().w_full().min_w(this.diffWidth).h_full().child(v_virtual_list("changes-diff", this.rows.length, 20, (i) => String(i),
             (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full()))))
