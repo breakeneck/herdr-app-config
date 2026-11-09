@@ -3,10 +3,12 @@
 // Changes panel reads when it generates: { provider, command, args, model, url }.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { props, closeOverlay, theme, shared, setShared } from "herdr";
 
-const DEFAULTS = { provider: "claude", command: "claude", args: "-p", model: "", url: "http://localhost:11434/v1" };
+const DEFAULT_TEMPLATE = "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it. No blank lines anywhere.";
+// Same default as in changes-copy/main.js (which builds the prompt).
+const DEFAULTS = { provider: "claude", command: "claude", args: "-p", model: "", url: "http://localhost:11434/v1", template: "", noBlank: true };
 const cfg = () => ({ ...DEFAULTS, ...(shared("commit.gen") ?? {}) });
 const setCfg = (patch) => setShared("commit.gen", { ...cfg(), ...patch });
 
@@ -27,6 +29,12 @@ export default class CommitGen extends View {
     this.url = field(DEFAULTS.url, c.url, (v, cx) => { if (v !== cfg().url) { setCfg({ url: v, model: "" }); this.loadModels(cx); } });
     this.command = field("claude", c.command, (v) => { if (v !== cfg().command) setCfg({ command: v || "claude" }); });
     this.args = field("-p", c.args, (v) => { if (v !== cfg().args) setCfg({ args: v }); });
+    // The message format the model is asked for; empty = the default (shown as the starting text).
+    this.template = TextareaState.new({ placeholder: DEFAULT_TEMPLATE, rows: 4 });
+    this.template.set_value(c.template || DEFAULT_TEMPLATE);
+    const keepTemplate = () => { const v = this.template.value().trim(); setCfg({ template: v === DEFAULT_TEMPLATE ? "" : v }); };
+    this.template.on("blur", (_e, cx) => { keepTemplate(); cx.notify(); });
+    this.template.on("change", () => keepTemplate());
     if (c.provider === "local") this.loadModels(cx);
   }
 
@@ -77,6 +85,20 @@ export default class CommitGen extends View {
           .text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Reload models").on_mouse_down("left", stop)
           .on_click((_e, cx) => this.loadModels(cx)).child("↻"))))
       .when(!local, (e) => e.child(line("Command", input(this.command), div().w(70).flex_none().child(input(this.args)))))
+      .child(h_flex().gap(10).items_start().child(label("Template").mt(6))
+        .child(v_flex().flex_1().min_w(0).gap(4)
+          .child(div().id("cg-template").h(86).px(10).py(6).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
+            .on_mouse_down("left", stop).child(Textarea.new(this.template).w_full().h(72).text_size(12).text_color(t.foreground)))
+          .child(h_flex().gap(8).items_center().text_size(11)
+            .child(h_flex().id("cg-noblank").gap(6).items_center().cursor_pointer().on_mouse_down("left", stop)
+              .on_click((_e, cx) => { setCfg({ noBlank: !(c.noBlank !== false) }); cx.notify(); })
+              .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10)
+                .border_color(c.noBlank !== false ? t.accent : t.border).bg(c.noBlank !== false ? t.accent : t.background)
+                .text_color(t.accent_foreground).child(c.noBlank !== false ? "✓" : ""))
+              .child(div().text_color(t.muted).child("No blank lines")))
+            .child(div().flex_1())
+            .child(div().id("cg-tpl-reset").text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground)).on_mouse_down("left", stop)
+              .on_click((_e, cx) => { this.template.set_value(DEFAULT_TEMPLATE); setCfg({ template: "" }); cx.notify(); }).child("Reset")))))
       .child(line("Model",
         h_flex().id("cg-model").flex_1().min_w(0).h(28).px(10).items_center().justify_between().rounded(7).border_1().border_color(t.border)
           .bg(t.background).text_size(12).cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)

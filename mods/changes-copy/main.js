@@ -15,6 +15,8 @@ const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 
 const ITEM = 22, INDENT = 10; // ITEM: changed-file list row, INDENT: per tree level
+// Same default as the commit-gen window"s Template field.
+const DEFAULT_TEMPLATE = "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it. No blank lines anywhere.";
 const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
 // Generation settings live in shared("commit.gen"), edited in the commit-gen window.
 const openGenSettings = () => openOverlay({ mod: "commit-gen", kind: "window", key: "commit-gen", width: 460 });
@@ -236,7 +238,8 @@ export default class Changes extends View {
         const fresh = (st.stdout || "").split("\n").filter((l) => l.startsWith("?? ")).map((l) => l.slice(3)).slice(0, 20);
         let text = `Git status:\n${st.stdout}\n\nDiff:\n${(df.stdout || "").slice(0, 60000)}`;
         if (fresh.length) text += `\n\nNew untracked files (contents not shown): ${fresh.join(", ")}`;
-        const prompt = "Write one git commit message for these changes in this repository. Rules: a first line of up to 72 characters in imperative mood, then a blank line and short bullet details only when they add something. Reply with the message only — no quotes, no code fences, no explanations.";
+        // The template (commit-gen window) says how the message looks; blank lines are dropped unless allowed.
+        const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template || DEFAULT_TEMPLATE} Reply with the message only — no quotes, no code fences, no explanations.`;
         let msg;
         if (cfg.provider === "local") {
           const url = String(cfg.url || "").replace(/\/+$/, "");
@@ -253,6 +256,7 @@ export default class Changes extends View {
           msg = r.stdout.trim();
         }
         msg = msg.replace(/^```[^\n]*\n/, "").replace(/\n?```$/, "").trim();
+        if (cfg.noBlank !== false) msg = msg.split("\n").filter((l) => l.trim()).join("\n");
         if (!msg) throw new Error("the model returned nothing");
         if (key() === context) { this.input.set_value(msg); this.message = msg; }
       } catch (e) { if (key() === context) this.note = `Generate failed: ${e}`; }
