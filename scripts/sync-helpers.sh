@@ -2,6 +2,7 @@
 # Keeps the shared helper files identical across mods.
 #   section.js  canonical: mods/wb-spaces/section.js  (before the rename: mods/spaces-copy/)
 #   ai.js       canonical: mods/wb-ai/ai.js           (before the rename: mods/commit-gen/)
+#   secrets.js  canonical: mods/wb-tasks/secrets.js   (tokens: macOS Keychain)
 # Targets are discovered: every other mods/*/ folder that already contains the helper.
 # Mods without the helper (Herdr's built-ins) are never touched.
 #
@@ -16,7 +17,7 @@ case "${1:-}" in
   "") ;;
   -w|--write) write=1 ;;
   -h|--help)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
 esac
@@ -53,6 +54,7 @@ sync_file() {
 
 sync_file section.js wb-spaces spaces-copy
 sync_file ai.js wb-ai commit-gen
+sync_file secrets.js wb-tasks
 
 if [ "$differ" = 1 ]; then
   echo "Out of sync. Run: scripts/sync-helpers.sh --write" >&2

@@ -3,6 +3,7 @@ import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-bas
 import { exec, theme, shared, setShared, props, openOverlay, closeOverlay, spaces, panes, focused } from "herdr";
 import * as S from "./section.js";
 import { Trello, trelloAccount } from "./trello.js";
+import { getSecret, findSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 import { Buffer } from "buffer";
 
 // My open Jira issues grouped by their board's columns ("folders": To Do, In Progress, ...), in the
@@ -35,8 +36,8 @@ function upsertJira(acc) {
 // An account's email and auth header, or null (no token saved for it).
 async function credentials(acc) {
   if (!acc) return null;
-  const r = await exec("security", ["find-generic-password", "-s", SERVICE, "-a", acc.id, "-w"]);
-  return r.code === 0 ? { email: acc.email, auth: basic(acc.email, r.stdout.trim()) } : null;
+  const token = await getSecret(SERVICE, acc.id);
+  return token ? { email: acc.email, auth: basic(acc.email, token) } : null;
 }
 
 async function jira(base, auth, path, body) {
@@ -151,7 +152,8 @@ export default class Jira extends View {
     if (props()?.trelloCard) { this.trello = new Trello(this); this.trello.account = props().account; this.cardPopup = true; this.trello.loadCard(props().trelloCard, cx); return; }
     this.jst = {}; // Jira account id -> its list state (issues, columns, ...), see st()
     this.trello = new Trello(this);
-    this.remotes = new Map(store.get("remotes", [])); // `${on}|${cwd}` -> repo key
+    // `${on}|${cwd}` -> repo key; entries that aren't a key (wb-prs's own "remotes" objects found their way in once) are dropped.
+    this.remotes = new Map(store.get("remotes", []).filter(([, v]) => typeof v === "string"));
     this.loc = null; this.repo = null; this.picking = false; this.trelloForm = false; this.choosing = false; this.jform = null;
     this.press = null; this.dragging = false; // a pressed issue row, and whether it's being dragged
     this.saving = false; this.formError = null; this.query = "";
@@ -205,12 +207,10 @@ export default class Jira extends View {
     const sources = { ...(shared("wb.tasks.sources") ?? {}) };
     if (!jiraAccounts().length) {
       const s = shared(SETTINGS);
-      const [item, token] = await Promise.all([exec("security", ["find-generic-password", "-s", SERVICE]), exec("security", ["find-generic-password", "-s", SERVICE, "-w"])]);
-      const email = /"acct"<blob>="([^"]*)"/.exec(item.stdout)?.[1];
-      if (s?.site && email && !email.includes("|") && token.code === 0) {
+      const old = s?.site ? await findSecret(SERVICE) : null, email = old?.account;
+      if (email && !email.includes("|")) {
         const id = jiraId(s.site, email);
-        const r = await exec("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", id, "-w", token.stdout.trim()]);
-        if (r.code === 0) {
+        if (await setSecret(SERVICE, id, old.secret).then(() => true, () => false)) {
           upsertJira({ id, site: s.site, email, base: s.base ?? s.site, project: s.project ?? "" });
           const old = store.get("jira:cache", null);
           if (old) store.set(`jira:cache:${id}`, old);
@@ -323,9 +323,7 @@ export default class Jira extends View {
         if (!auth) throw new Error("No saved token · paste one");
         const base = await findBase(site, auth);
         if (token) {
-          // ponytail: -w puts the token in `security`'s argv for a moment (local ps only); its prompt can't be driven from a mod.
-          const r = await exec("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", id, "-w", token]);
-          if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
+          await setSecret(SERVICE, id, token);
           this.token.set_value("");
         }
         upsertJira({ id, site, email, base, project });
@@ -478,6 +476,10 @@ export default class Jira extends View {
   formView(t) {
     const button = (id, label, primary, onClick) => div().id(id).h(28).px(12).flex().flex_1().items_center().justify_center().rounded(7).cursor_pointer().text_size(12)
       .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
+    if (!secretsSupported()) return v_flex().p(8).gap(8).text_color(t.muted)
+      .child(div().text_color(t.foreground).font_semibold().child("Jira account"))
+      .child(div().text_size(11).child(UNSUPPORTED))
+      .child(button("cancel", "Cancel", false, (_e, cx) => { this.jform = null; cx.notify(); }));
     const edit = this.jform?.mode === "edit", keepToken = edit ? "API token (empty: keep the saved one)" : "API token";
     return v_flex().p(8).gap(8).text_color(t.muted)
       .child(div().text_color(t.foreground).font_semibold().child(edit ? "Jira account" : "Add a Jira account"))

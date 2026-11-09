@@ -3,6 +3,7 @@ import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, 
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
 import { migrateAi, models, modelFor, setUse, runModel, describe } from "./ai.js";
+import { getSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
 function installed(name, fresh) {
@@ -66,10 +67,7 @@ function remoteOf(url) {
 
 // GitLab: the token for a host, from the Keychain (null: none saved).
 const GL_SERVICE = "herdr-gitlab";
-async function gitlabToken(host) {
-  const r = await exec("security", ["find-generic-password", "-s", GL_SERVICE, "-a", host, "-w"]).catch(() => null);
-  return r?.code === 0 ? r.stdout.trim() || null : null;
-}
+const gitlabToken = (host) => getSecret(GL_SERVICE, host);
 async function gitlab(host, token, path, method = "GET", body) {
   const r = await fetch(`https://${host}/api/v4${path}`, { method, body: body ? JSON.stringify(body) : undefined,
     headers: { "PRIVATE-TOKEN": token, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) } });
@@ -424,9 +422,7 @@ export default class Prs extends View {
     cx.spawn(async (cx) => {
       try {
         await gitlab(host, token, "/user");
-        // ponytail: -w puts the token in `security`'s argv for a moment (local ps only).
-        const r = await exec("security", ["add-generic-password", "-U", "-s", GL_SERVICE, "-a", host, "-w", token]);
-        if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
+        await setSecret(GL_SERVICE, host, token);
         this.tokenInput.set_value(""); this.needToken = null;
         for (const [k, e] of this.byRepo) if (e.needToken === host) this.byRepo.delete(k);
       } catch (e) { this.tokenError = e.status === 401 ? `${host} rejected this token (needs the read_api scope)` : String(e.message ?? e); }
@@ -548,6 +544,9 @@ export default class Prs extends View {
     const host = this.needToken;
     const button = (id, label, primary, onClick) => div().id(id).h(28).px(12).flex().flex_1().items_center().justify_center().rounded(7).cursor_pointer().text_size(12)
       .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
+    if (!secretsSupported()) return v_flex().p(8).gap(8).text_color(t.muted)
+      .child(div().text_color(t.foreground).font_semibold().child(`Connect ${host}`))
+      .child(div().text_size(11).child(UNSUPPORTED));
     return v_flex().p(8).gap(8).text_color(t.muted)
       .child(div().text_color(t.foreground).font_semibold().child(`Connect ${host}`))
       .child(div().text_size(11).child("A personal access token with the api scope lets this panel list merge requests and approve them (read_api: list only)."))

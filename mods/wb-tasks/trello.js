@@ -8,6 +8,7 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
 import { exec, props, closeOverlay, shared, setShared } from "herdr";
+import { getSecret, findSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 
 const SERVICE = "herdr-trello";
 const API = "https://api.trello.com/1";
@@ -28,15 +29,10 @@ function upsertAccount(acc) {
   setShared(ACCOUNTS, { ...all, trello: list.some((a) => a.id === acc.id) ? list.map((a) => (a.id === acc.id ? acc : a)) : [...list, acc] });
 }
 async function credentials(id) {
-  const r = await exec("security", ["find-generic-password", "-s", SERVICE, "-a", id, "-w"]);
-  const v = r.code === 0 ? r.stdout.trim() : "", at = v.indexOf(":");
+  const v = (await getSecret(SERVICE, id)) ?? "", at = v.indexOf(":");
   return at > 0 ? { key: v.slice(0, at), token: v.slice(at + 1) } : null;
 }
-async function keep(id, key, token) {
-  // ponytail: -w puts the secret in `security`'s argv for a moment (local ps only).
-  const r = await exec("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", id, "-w", `${key}:${token}`]);
-  if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
-}
+const keep = (id, key, token) => setSecret(SERVICE, id, `${key}:${token}`);
 
 async function call(creds, path, query = {}, method = "GET") {
   const r = await fetch(`${API}${path}?${qs({ ...query, key: creds.key, token: creds.token })}`, { method, headers: { Accept: "application/json" } });
@@ -77,12 +73,11 @@ export class Trello {
   // The first build kept one key + token with the key as the Keychain account: make it an account.
   async migrate() {
     if (trelloAccounts().length) return null;
-    const [item, token] = await Promise.all([exec("security", ["find-generic-password", "-s", SERVICE]), exec("security", ["find-generic-password", "-s", SERVICE, "-w"])]);
-    const key = /"acct"<blob>="([^"]*)"/.exec(item.stdout)?.[1];
-    if (token.code !== 0 || !/^[0-9a-f]{32}$/i.test(key ?? "")) return null;
+    const old = await findSecret(SERVICE), key = old?.account;
+    if (!old || !/^[0-9a-f]{32}$/i.test(key ?? "")) return null;
     try {
-      const me = await call({ key, token: token.stdout.trim() }, "/members/me", { fields: "id,fullName,username" });
-      await keep(me.id, key, token.stdout.trim());
+      const me = await call({ key, token: old.secret }, "/members/me", { fields: "id,fullName,username" });
+      await keep(me.id, key, old.secret);
       upsertAccount({ id: me.id, name: me.fullName || me.username, username: me.username });
       return me.id;
     } catch { return null; }
@@ -172,10 +167,12 @@ export class Trello {
     const field = (id, label, state) => v_flex().gap(3).child(div().text_size(10).text_color(t.dim).child(label))
       .child(div().id(id).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(state).h_full().w_full().text_size(12).text_color(t.foreground)));
-    return v_flex().p(8).gap(8).text_color(t.muted)
+    const head = v_flex().p(8).gap(8).text_color(t.muted)
       .child(h_flex().items_center().child(div().flex_1().text_color(t.foreground).font_semibold().child("Add a Trello account"))
         .child(div().id("tr-cancel").text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
-          .on_click((_e, cx) => { this.view.trelloForm = false; cx.notify(); }).child("Cancel")))
+          .on_click((_e, cx) => { this.view.trelloForm = false; cx.notify(); }).child("Cancel")));
+    if (!secretsSupported()) return head.child(div().text_size(11).child(UNSUPPORTED));
+    return head
       .child(div().text_size(11).child("1. Open the Power-Up admin, make (or open) a Power-Up and copy its API key. 2. Get token: Allow, then copy the token."))
       .child(field("tr-key", "API key", this.keyInput))
       .child(h_flex().gap(6)
