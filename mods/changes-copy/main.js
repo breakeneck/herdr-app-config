@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, Editor, EditorState } from "gpui-base";
 import { highlight, languageFor } from "./highlight.js";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
 
@@ -30,24 +30,26 @@ function changeMarks(lines) {
   return { added, removed };
 }
 
+const EDITOR_LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
+
 // Numbers each diff line once, so a frame only draws the rows on screen.
 function diffRows(lines) {
   let old = 0, next = 0;
   return lines.map((line) => {
     const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-    if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line }; }
+    if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line, raw: line }; }
     const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: line.slice(1) || " " };
-    if (kind === "+") return { kind, number: next++, text: line.slice(1) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " " }; }
-    return { kind: "", text: line };
+    if (kind === "-") return { kind, number: old++, text: line.slice(1) || " ", raw: line };
+    if (kind === "+") return { kind, number: next++, text: line.slice(1) || " ", raw: line };
+    if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " ", raw: line }; }
+    return { kind: "", text: line, raw: line };
   });
 }
 
 export default class Changes extends View {
   init(_props, cx) {
-    this.files = []; this.rows = []; this.diffWidth = 0; this.mode = "diff"; this.view = "list"; this.collapsed = new Set();
-    try { if (localStorage.getItem("view") === "tree") this.view = "tree"; } catch {}
+    this.files = []; this.rows = []; this.diffWidth = 0; this.mode = "diff"; this.text = false; this.textState = null; this.textId = null; this.view = "list"; this.collapsed = new Set();
+    try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("text") === "1") this.text = true; } catch {}
     this.code = null; this.codeText = null; this.marks = { added: new Set(), removed: new Map() }; this.fileWidth = 0; this.codePath = null; this.codeError = null; this.message = ""; this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Commit message" });
     this.input.on("change", (_e, cx) => {
@@ -154,7 +156,9 @@ export default class Changes extends View {
   releaseCode() { this.code = null; this.codeText = null; this.codePath = null; this.codeError = null; }
 
   // Full file as lines of a virtual list, with the diff's added/removed lines marked.
-  async loadCode(path, context) {
+  async loadCode(path, context) { await this.loadCode0(path, context); this.syncText(); }
+
+  async loadCode0(path, context) {
     if (!path) { this.releaseCode(); return; }
     const file = this.files.find((f) => f.path === path);
     if (!file || file.status === "D") { this.releaseCode(); this.codePath = path; this.codeError = "File is deleted · no full view"; return; }
@@ -231,7 +235,32 @@ export default class Changes extends View {
       const context = this.context;
       cx.spawn(async (cx) => { await this.loadCode(this.open, context); cx.notify(); });
     } else this.releaseCode();
+    this.syncText();
     cx.notify();
+  }
+
+  // Text view: the same content in a read-only Editor, where characters can be selected and copied natively.
+  // EditorState needs a live host call, so it is made here (never in render) and kept while the file and mode stay.
+  syncText() {
+    const loaded = this.mode === "file" ? this.codeText !== null : this.rows.length > 0;
+    if (!this.text || !this.open || !loaded) { this.releaseText(); return; }
+    const value = this.mode === "file" ? this.codeText : this.rows.map((r) => r.raw).join("\n");
+    const id = `${this.mode}:${this.open}`;
+    if (this.textState && this.textId === id) { if (this.textState.value() !== value) this.textState.set_value(value); return; }
+    this.releaseText();
+    const t = theme(), ext = this.open.includes(".") ? this.open.split(".").pop().toLowerCase() : "txt";
+    this.textState = EditorState.new({ language: EDITOR_LANG[ext] ?? ext, readonly: true, value,
+      font_family: settings().font_family, font_size: 12, folding: false,
+      syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+    this.textId = id;
+  }
+
+  releaseText() { if (this.textState) this.textState.release(); this.textState = null; this.textId = null; }
+
+  toggleText(cx) {
+    this.text = !this.text;
+    try { localStorage.setItem("text", this.text ? "1" : "0"); } catch {}
+    this.syncText(); cx.notify();
   }
 
   setLines(lines) {
@@ -239,6 +268,7 @@ export default class Changes extends View {
     this.rows = diffRows(lines);
     this.marks = changeMarks(lines);
     this.diffWidth = Math.max(300, ...lines.map(line => line.length * 7 + 50));
+    this.syncText();
   }
 
   pick(path, cx) {
@@ -332,15 +362,19 @@ export default class Changes extends View {
         .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
-        .when(this.mode === "file", (e) => e.child(this.code ? div().id("changes-file-x").size_full().overflow_x_scrollbar()
+        .when(this.mode === "file" && !(this.text && this.textState), (e) => e.child(this.code ? div().id("changes-file-x").size_full().overflow_x_scrollbar()
           .child(div().w_full().min_w(this.fileWidth).h_full().child(v_virtual_list("changes-file", this.code.length, 20, (i) => String(i),
             (range) => Array.from({ length: range.end - range.start }, (_, k) => this.fileRow(range.start + k, t))).size_full()))
           : div().p(12).text_color(t.dim).child(this.open ? (this.codeError || "Loading file…") : "Select a file to view it")))
-        .when(this.mode === "file" && this.code, (e) => e.child(Scrollbar.vertical("changes-file").viewport_from_layout().absolute().inset_0()))
-        .when(this.mode !== "file", (e) => e.child(div().id("changes-diff-x").size_full().overflow_x_scrollbar()
+        .when(this.mode === "file" && this.code && !(this.text && this.textState), (e) => e.child(Scrollbar.vertical("changes-file").viewport_from_layout().absolute().inset_0()))
+        .when(this.mode !== "file" && !(this.text && this.textState), (e) => e.child(div().id("changes-diff-x").size_full().overflow_x_scrollbar()
           .child(div().w_full().min_w(this.diffWidth).h_full().child(v_virtual_list("changes-diff", this.rows.length, 20, (i) => String(i),
             (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full()))))
-        .when(this.mode !== "file", (e) => e.child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0()))
+        .when(this.mode !== "file" && !(this.text && this.textState), (e) => e.child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0()))
+        .when(this.text && this.textState, (e) => e.child(Editor.new(this.textState).size_full()))
+        .when(this.open && (this.mode === "file" ? this.code : this.rows.length > 0), (e) => e.child(div().id("text-toggle").absolute().top(6).right(18).h(22).px(9).flex().items_center().rounded(6).border_1()
+          .border_color(this.text ? t.accent : t.border).bg(t.surface).text_size(11).cursor_pointer().text_color(this.text ? t.foreground : t.muted)
+          .hover((x) => x.bg(t.hover)).on_click((_e, cx) => this.toggleText(cx)).child("Select text")))
         .when(this.mode !== "file" && !this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))))
       .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
       .child(h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border)
