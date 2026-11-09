@@ -29,7 +29,7 @@
               "id": "spaces",
               "type": "block",
               "content": {
-                "mod": "spaces-copy"
+                "mod": "wb-spaces"
               },
               "size": {
                 "weight": 1
@@ -40,7 +40,7 @@
               "id": "files",
               "type": "block",
               "content": {
-                "mod": "files-copy"
+                "mod": "wb-files"
               },
               "size": {
                 "weight": 1
@@ -51,7 +51,7 @@
               "id": "remote-projects",
               "type": "block",
               "content": {
-                "mod": "remote-projects"
+                "mod": "wb-projects"
               },
               "size": {
                 "px": 31
@@ -62,7 +62,7 @@
               "id": "agents",
               "type": "block",
               "content": {
-                "mod": "agents-copy"
+                "mod": "wb-agents"
               },
               "size": {
                 "px": 42
@@ -105,7 +105,7 @@
           "id": "tabs",
           "type": "block",
           "content": {
-            "mod": "tabs-copy"
+            "mod": "wb-tabs"
           },
           "size": {
             "px": 42
@@ -157,28 +157,28 @@
                       "id": "changes",
                       "type": "block",
                       "content": {
-                        "mod": "changes-copy"
+                        "mod": "wb-changes"
                       }
                     },
                     {
                       "id": "jira",
                       "type": "block",
                       "content": {
-                        "mod": "jira"
+                        "mod": "wb-tasks"
                       }
                     },
                     {
                       "id": "prs",
                       "type": "block",
                       "content": {
-                        "mod": "prs"
+                        "mod": "wb-prs"
                       }
                     },
                     {
                       "id": "git",
                       "type": "block",
                       "content": {
-                        "mod": "git-log"
+                        "mod": "wb-git"
                       }
                     }
                   ],
