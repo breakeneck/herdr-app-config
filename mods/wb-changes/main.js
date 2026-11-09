@@ -1,8 +1,18 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
 import { migrateAi, modelFor, runModel, describe } from "./ai.js";
+// Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
+const _soft = {};
+function installed(name, fresh) {
+  const c = (_soft[name] ??= { ok: true, at: 0 });
+  if (!fresh && Date.now() - c.at < 60000) return c.ok;
+  c.at = Date.now();
+  const p = readTextFile(`${appHome()}/mods/${name}/main.js`).then((r) => (c.ok = r != null), () => (c.ok = false));
+  return fresh ? p : c.ok; // stale: answer from the cache now, the next call sees the re-read
+}
+
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -209,8 +219,9 @@ export default class Changes extends View {
 
   // A clicked file opens its PhpStorm-style side-by-side diff wide in the main area, as a tab.
   // One diff tab per space: clicking another file sends it a new request through shared state.
-  openMain(path) {
+  async openMain(path) {
     if (!this.root) return;
+    if (!installed("wb-diff") && !(await installed("wb-diff", true))) { notify({ title: "Install wb-diff to see diffs", body: path, level: "info" }); return; }
     const file = this.files.find((f) => f.path === path);
     const space = spaces().find((s) => s.active);
     // `space`: each space's diff tab takes only its own space's requests.
@@ -262,7 +273,8 @@ export default class Changes extends View {
       .on_click(() => { closeOverlay(props()?.overlay); action(); })
       .child(svg("mods/wb-changes/icons/settings.svg").size(13).text_color(t.muted)).child(label);
     return v_flex().p(6).gap(2).w_full().bg(t.raised).text_color(t.foreground)
-      .child(item("gen-settings", "AI models…", openGenSettings));
+      .when(installed("wb-ai"), (e) => e.child(item("gen-settings", "AI models…", openGenSettings)))
+      .when(!installed("wb-ai"), (e) => e.child(div().px(10).py(6).text_size(12).text_color(t.dim).child("Install wb-ai to pick models; using the default Claude CLI.")));
   }
 
   commit(cx) {

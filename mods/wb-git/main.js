@@ -6,8 +6,18 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { spaces, panes, focused, exec, theme, notify, run, setShared } from "herdr";
+import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, run, setShared } from "herdr";
 import * as S from "./section.js";
+// Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
+const _soft = {};
+function installed(name, fresh) {
+  const c = (_soft[name] ??= { ok: true, at: 0 });
+  if (!fresh && Date.now() - c.at < 60000) return c.ok;
+  c.at = Date.now();
+  const p = readTextFile(`${appHome()}/mods/${name}/main.js`).then((r) => (c.ok = r != null), () => (c.ok = false));
+  return fresh ? p : c.ok; // stale: answer from the cache now, the next call sees the re-read
+}
+
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -166,8 +176,9 @@ export default class GitLog extends View {
   }
 
   // A file of a commit: that commit's change, in the main area's diff tab (one per space).
-  openFile(c, f) {
+  async openFile(c, f) {
     const { on, root } = this.where(this.cur);
+    if (!installed("wb-diff") && !(await installed("wb-diff", true))) { this.openCommitWeb(c, on, root); return; }
     const space = spaces().find((s) => s.active);
     const req = { space: space?.id ?? null, root, on, path: f.path, commit: c.hash, status: f.status, fresh: false, ts: Date.now() };
     const ids = new Set((space?.tabs ?? []).map((t) => t.id));
@@ -176,6 +187,18 @@ export default class GitLog extends View {
     const name = `${f.path.split("/").pop()} @ ${c.short}`;
     if (existing) { run("tab.select", { id: existing.tab }); run("tab.rename", { id: existing.tab, name }); }
     else run("tab.new", { name, mod: "wb-diff", props: req, space: space?.id ?? undefined });
+  }
+
+  // Without wb-diff: the commit on GitHub/GitLab in the browser (from origin's https or ssh url), else a toast.
+  async openCommitWeb(c, on, root) {
+    let url = null;
+    try {
+      const o = (await exec("git", ["remote", "get-url", "origin"], { cwd: root, on })).stdout.trim();
+      const m = o.match(/^(?:https?:\/\/(?:[^@/]+@)?|ssh:\/\/(?:[^@/]+@)?|git@)([^/:]+)(?::\d+)?[/:](.+?)(?:\.git)?\/?$/);
+      if (m && /github|gitlab/i.test(m[1])) url = `https://${m[1]}/${m[2]}${/gitlab/i.test(m[1]) ? "/-" : ""}/commit/${c.hash}`;
+    } catch {}
+    if (url) exec("open", [url]);
+    else notify({ title: "Install wb-diff to see diffs", body: `${c.short} ${c.subject ?? ""}`.trim(), level: "info" });
   }
 
   row(c, r, t) {

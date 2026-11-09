@@ -7,6 +7,16 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, run, exec, hc, theme, appHome, readTextFile, writeTextFile, notify, shared, openOverlay } from "herdr";
 import * as S from "./section.js";
+// Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
+const _soft = {};
+function installed(name, fresh) {
+  const c = (_soft[name] ??= { ok: true, at: 0 });
+  if (!fresh && Date.now() - c.at < 60000) return c.ok;
+  c.at = Date.now();
+  const p = readTextFile(`${appHome()}/mods/${name}/main.js`).then((r) => (c.ok = r != null), () => (c.ok = false));
+  return fresh ? p : c.ok; // stale: answer from the cache now, the next call sees the re-read
+}
+
 
 const FILE = () => `${appHome()}/remote-projects.json`;
 const ICON = (n) => `mods/wb-projects/${n}.svg`;
@@ -197,9 +207,9 @@ export default class RemoteProjects extends View {
           .child("No projects yet: add a folder below.")))
         .children(list.map((p) => this.row(p, t, ps))))
       .when(Boolean(this.machine), (el) => el.child(h_flex().px(10).py(8).gap(6).items_center()
-        .child(div().id("rp-browse").size(28).flex_none().flex().items_center().justify_center().rounded(7).border_1().border_color(t.input).bg(t.background).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Browse folders on this machine…").on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .when(installed("wb-folder-picker"), (b) => b.child(div().id("rp-browse").size(28).flex_none().flex().items_center().justify_center().rounded(7).border_1().border_color(t.input).bg(t.background).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Browse folders on this machine…").on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => openOverlay({ mod: "wb-folder-picker", kind: "dialog", width: 520, height: 480, props: { machine: this.machine, start: this.homes[this.machine] ?? "~" } }))
-          .child(svg("mods/wb-projects/icons/folder-plus.svg").size(14)))
+          .child(svg("mods/wb-projects/icons/folder-plus.svg").size(14))))
         .child(Input.new(this.input).flex_1().h(28).px(8).rounded(7).border_1().border_color(t.input)
           .bg(t.background).text_size(12).text_color(t.foreground))))
       .when(Boolean(ov), (el) => el.child(ov));

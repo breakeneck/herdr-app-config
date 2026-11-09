@@ -1,6 +1,16 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, exec } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, exec, appHome, readTextFile } from "herdr";
+// Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
+const _soft = {};
+function installed(name, fresh) {
+  const c = (_soft[name] ??= { ok: true, at: 0 });
+  if (!fresh && Date.now() - c.at < 60000) return c.ok;
+  c.at = Date.now();
+  const p = readTextFile(`${appHome()}/mods/${name}/main.js`).then((r) => (c.ok = r != null), () => (c.ok = false));
+  return fresh ? p : c.ok; // stale: answer from the cache now, the next call sees the re-read
+}
+
 
 // The first node (depth first) that passes `pred`, with the chain of its ancestors (root first).
 function find(node, pred, up = []) {
@@ -188,8 +198,8 @@ export default class Tabs extends View {
                 .border(1).border_color(t.border).bg(t.raised).text_size(12).text_color(t.muted)
                 .hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
                 .on_mouse_down("left", stop)
-                .tooltip(`Branch ${branch}${g.ahead || g.behind ? ` · ↑${g.ahead} ↓${g.behind}` : ""} — click to switch`)
-                .on_click(() => openOverlay({ mod: "wb-branch-picker", kind: "popup", width: 460, height: 560, props: { space: sid } }))
+                .tooltip(`Branch ${branch}${g.ahead || g.behind ? ` · ↑${g.ahead} ↓${g.behind}` : ""}${installed("wb-branch-picker") ? " — click to switch" : ""}`)
+                .on_click(() => { if (installed("wb-branch-picker")) openOverlay({ mod: "wb-branch-picker", kind: "popup", width: 460, height: 560, props: { space: sid } }); })
                 .child(svg("mods/wb-tabs/icons/git-branch.svg").size(13).text_color(t.muted))
                 .child(div().max_w(180).truncate().text_color(t.foreground).child(branch))
                 .when(Boolean(g.ahead || g.behind), el => el.child(

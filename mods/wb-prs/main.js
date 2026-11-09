@@ -1,8 +1,18 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, Textarea } from "gpui-base";
-import { spaces, panes, focused, exec, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
 import { migrateAi, models, modelFor, setUse, runModel, describe } from "./ai.js";
+// Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
+const _soft = {};
+function installed(name, fresh) {
+  const c = (_soft[name] ??= { ok: true, at: 0 });
+  if (!fresh && Date.now() - c.at < 60000) return c.ok;
+  c.at = Date.now();
+  const p = readTextFile(`${appHome()}/mods/${name}/main.js`).then((r) => (c.ok = r != null), () => (c.ok = false));
+  return fresh ? p : c.ok; // stale: answer from the cache now, the next call sees the re-read
+}
+
 
 // AI review drafts, per PR/MR url, until posted or discarded: shared "wb.ai.reviewDrafts" = { url: { text, model, at } }.
 const DRAFTS = "wb.ai.reviewDrafts";
@@ -339,9 +349,9 @@ export default class Prs extends View {
         .when(modelFor("review")?.id === m.id, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => { setUse("review", m.id); this.aiMenu = false; cx.notify(); })
         .child(div().flex_1().truncate().text_size(12).child(m.name)).child(div().text_size(11).text_color(t.dim).child(describe(m)))))
-      .child(div().h(1).my(2).bg(t.border))
-      .child(h_flex().id("rv-settings").h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { this.aiMenu = false; openAiModels(); cx.notify(); }).child("AI models…"));
+      .when(installed("wb-ai"), (e) => e.child(div().h(1).my(2).bg(t.border)))
+      .when(installed("wb-ai"), (e) => e.child(h_flex().id("rv-settings").h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.aiMenu = false; openAiModels(); cx.notify(); }).child("AI models…")));
     return v_flex().id("pr-detail").size_full().min_h(0).relative().bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().h(44).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().text_size(12).text_color(t.dim).child(num))
