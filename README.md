@@ -64,7 +64,7 @@ Saved only in the macOS Keychain through `security`, as generic passwords: servi
   - plus other `*-copy` clones of shipped mods we customized
 - `layouts/` — layouts (`workbench` is the packaged one, `remote` its predecessor)
 - `themes/` — custom gruvbox themes
-- `remote-projects.json`, `shared.json` — project list and shared mod state
+- `remote-projects.json`, `shared.json` — project list and shared mod state (local only, gitignored)
 - `HERDR-TASKS.md` — changelog of features requested/built (UA)
 
 ## Not tracked (on purpose)
