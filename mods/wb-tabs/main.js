@@ -2,14 +2,18 @@ import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, exec } from "herdr";
 
-function find(node, id) {
-  if (node?.id === id) return node;
-  for (const child of node?.children ?? []) {
-    const found = find(child, id);
+// The first node (depth first) that passes `pred`, with the chain of its ancestors (root first).
+function find(node, pred, up = []) {
+  if (!node) return null;
+  if (pred(node)) return { node, up };
+  for (const child of node.children ?? []) {
+    const found = find(child, pred, [...up, node]);
     if (found) return found;
   }
   return null;
 }
+const blocks = (node) => node.type === "block" ? [node] : (node.children ?? []).flatMap(blocks);
+const isTab = (n) => n.type === "block" && n.content?.tab !== undefined;
 
 // Where a space works now: its focused terminal's folder, else the first known one,
 // else where the space was made (the same rule the spaces list uses).
@@ -18,9 +22,22 @@ function place(sp, ps) {
   return ps.find(p => p.focused && tabs.has(p.tab))?.cwd
     ?? ps.find(p => tabs.has(p.tab) && p.cwd)?.cwd ?? sp?.folder ?? null;
 }
-// Right-panel blocks that get a header button while they sit in the panel's stack: [node id, label, icon].
-const PANELS = [["files", "Files", "mods/wb-tabs/icons/file.svg"], ["changes", "Changes", "mods/wb-tabs/icons/changes.svg"],
-  ["jira", "Tasks", "mods/wb-tabs/icons/jira.svg"], ["prs", "PR", "mods/wb-tabs/icons/pr.svg"], ["git", "Git", "mods/wb-tabs/icons/git-branch.svg"]];
+// Right-panel mods that get a header button while their block sits in the panel's stack: [mod, label, icon].
+const PANELS = [["wb-files", "Files", "mods/wb-tabs/icons/file.svg"], ["wb-changes", "Changes", "mods/wb-tabs/icons/changes.svg"],
+  ["wb-tasks", "Tasks", "mods/wb-tabs/icons/jira.svg"], ["wb-prs", "PR", "mods/wb-tabs/icons/pr.svg"], ["wb-git", "Git", "mods/wb-tabs/icons/git-branch.svg"]];
+const PANEL_MODS = new Set(PANELS.map(([mod]) => mod));
+const isPanelBlock = (n) => n.type === "block" && PANEL_MODS.has(n.content?.mod);
+
+// The right panel, found by what it holds rather than by ids: `body` is the first stack with a
+// PANELS block in it; `panel` is what hides and shows it: the stack's highest ancestor that holds
+// nothing but PANELS blocks (the column around the stack), else the stack itself. Never the root.
+function findPanel(root) {
+  const r = find(root, (n) => n.type === "stack" && (n.children ?? []).some(isPanelBlock));
+  if (!r) return { panel: null, body: null };
+  let panel = r.node;
+  for (let i = r.up.length - 1; i > 0 && blocks(r.up[i]).every(isPanelBlock); i--) panel = r.up[i];
+  return { panel, body: r.node };
+}
 const keyOf = (sp, ps) => JSON.stringify([sp?.machine ?? null, place(sp, ps)]);
 
 export default class Tabs extends View {
@@ -76,8 +93,8 @@ export default class Tabs extends View {
         const stored = this.panels[space.id] ?? null, want = enabled.includes(stored) ? stored : null;
         if (want !== now) {
           this.pending = { want, until: Date.now() + 1000 };
-          if (want) { run("layout.select", { stack: "panel-body", child: want }); run("layout.show", { id: "panel" }); }
-          else run("layout.hide", { id: "panel" });
+          if (want) { run("layout.select", { stack: body.id, child: want }); run("layout.show", { id: panel.id }); }
+          else run("layout.hide", { id: panel.id });
           return;
         }
       }
@@ -131,12 +148,15 @@ export default class Tabs extends View {
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
         .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/wb-tabs/icons/close.svg").size(12))));
     };
-    const root = layout(), sidebar = find(root, "sidebar"), w = window();
+    const root = layout(), w = window();
+    // What sits left of the bar: the root row's children before the one holding the tab view (the sidebar).
+    const at = root?.type === "row" ? root.children.findIndex((c) => find(c, isTab)) : -1;
+    const left = (at > 0 ? root.children.slice(0, at) : []).reduce((sum, c) => sum + (c.hidden ? 0 : c.size?.px ?? 0), 0);
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
     const lightsPadding = w?.platform === "macos" && w.titlebar === "none" && !w.fullscreen && root?.traffic_lights
-      ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
+      ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - left)
       : 10;
-    const panel = find(root, "panel"), body = find(root, "panel-body");
+    const { panel, body } = findPanel(root);
     // The right panel's buttons: whatever blocks sit in its stack now (blocks moved out of it
     // with Edit layout are sections elsewhere and collapse by their own title instead).
     const enabled = (body?.children ?? []).map(c => c.id);
@@ -147,8 +167,8 @@ export default class Tabs extends View {
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click(() => {
-          if (on) run("layout.hide", { id: "panel" });
-          else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
+          if (on) run("layout.hide", { id: panel.id });
+          else { run("layout.select", { stack: body.id, child: id }); run("layout.show", { id: panel.id }); }
         }).child(svg(icon).size(14)).child(label);
     };
     // layout.toggle didn't take on this weighted sidebar block; explicit hide/show (the panel-button way).
@@ -177,7 +197,10 @@ export default class Tabs extends View {
             ))
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
-      .children(PANELS.filter(([id]) => enabled.includes(id)).map(([id, label, icon]) => panelButton(id, label, icon)))
+      .children(PANELS.flatMap(([mod, label, icon]) => {
+        const block = body?.children?.find((c) => c.content?.mod === mod);
+        return block ? [panelButton(block.id, label, icon)] : [];
+      }))
       .child(div().w(1).h(16).mx(4).flex_none().bg(t.border))
       .child(editButton)
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/wb-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))

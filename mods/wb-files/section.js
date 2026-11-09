@@ -11,9 +11,6 @@ import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { layout, shared, setShared, run, theme } from "herdr";
 
-// Containers the window is built on: never pruned when they empty out.
-const KEEP = new Set(["root", "sidebar", "sidebar-lists", "work", "work-body"]);
-
 function find(node, pred, parent = null) {
   if (!node) return null;
   if (pred(node)) return { node, parent };
@@ -64,18 +61,44 @@ export function toggle(sec, px) {
   run("layout.set", { layout: root });
 }
 
+// Containers the window is built on, found in the tree as it is before a change (no ids):
+// the root, every ancestor of the { "tab": "active" } block, every column or row that holds
+// a block directly (a sidebar column of sections, the sidebar around it) or one above those,
+// and any container already empty (only a kept one can be). The rest may go when a move
+// empties them: stacks, and containers holding only such (the right panel's column).
+function kept(root) {
+  const keep = new Set([root, ...(path(root, (n) => n.type === "block" && n.content?.tab !== undefined) ?? [])]);
+  const prunable = (n) => n.type === "stack" || (n.children.length > 0 && n.children.every((c) => c.children && prunable(c)));
+  const walk = (n) => {
+    if (!n.children) return;
+    if (!prunable(n)) keep.add(n);
+    n.children.forEach(walk);
+  };
+  walk(root);
+  return keep;
+}
+// The ancestors of the first node that passes `pred` (root first), or null.
+function path(node, pred, up = []) {
+  if (pred(node)) return up;
+  for (const c of node.children ?? []) {
+    const r = path(c, pred, [...up, node]);
+    if (r) return r;
+  }
+  return null;
+}
+
 // Drop containers a move left empty (a stack with no children, a column with nothing in it).
-function prune(node) {
+function prune(node, keep) {
   if (!node.children) return;
-  for (const c of node.children) prune(c);
-  node.children = node.children.filter((c) => !c.children || c.children.length || KEEP.has(c.id));
+  for (const c of node.children) prune(c, keep);
+  node.children = node.children.filter((c) => !c.children || c.children.length || keep.has(c));
   if (node.type === "stack" && node.children.length && !node.children.some((c) => c.id === node.active)) node.active = node.children[0].id;
 }
 
 // Put block `src` before/after `target` (a stack child: beside its stack).
 export function move(src, target, where) {
   if (!src || src === target) return;
-  const root = tree();
+  const root = tree(), keep = kept(root);
   const s = find(root, (n) => n.id === src);
   let t = find(root, (n) => n.id === target);
   if (!s?.parent || !t?.parent) return;
@@ -91,7 +114,7 @@ export function move(src, target, where) {
   const kids = t.parent.children;
   const i = kids.indexOf(t.node) + (where === "after" ? 1 : 0);
   kids.splice(i, 0, s.node);
-  prune(root);
+  prune(root, keep);
   run("layout.set", { layout: root });
 }
 
