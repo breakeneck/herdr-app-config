@@ -64,15 +64,16 @@ export default class DiffView extends View {
     this.loading = true; this.error = null; this.rows = []; this.hunks = []; this.cur = -1; this.scrollY = 0;
     cx.spawn(async (cx) => {
       try {
-        const { root, on, path, against, fresh } = req;
+        // `commit`: that commit's own change to the file (from the Git panel), not the working tree's.
+        const { root, on, path, against, fresh, commit } = req;
         let lines;
-        if (fresh) {
+        if (fresh && !commit) {
           const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
           if (text === null) throw new Error("cannot read this file (binary, too large, or unreadable)");
           lines = text.replace(/\n$/, "").split("\n").slice(0, 20000).map((l) => "+" + l);
         } else {
           // Full-file mode: huge context so git emits the whole file, aligned, with changes tinted.
-          const r = await exec("git", [...READ, "diff", ...(against ? [against] : []), "--no-ext-diff", "--no-color", this.mode === "file" ? "-U1000000" : "-U3", "--", path], { cwd: root, on });
+          const r = await exec("git", [...READ, "diff", ...(commit ? [`${commit}^!`] : against ? [against] : []), "--no-ext-diff", "--no-color", this.mode === "file" ? "-U1000000" : "-U3", "--", path], { cwd: root, on });
           if (r.code !== 0) throw new Error(r.stderr.trim() || "git diff failed");
           const all = r.stdout.replace(/\n$/, "").split("\n");
           const at = all.findIndex((l) => l.startsWith("@@"));

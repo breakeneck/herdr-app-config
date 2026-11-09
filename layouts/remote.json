@@ -173,6 +173,13 @@
                       "content": {
                         "mod": "prs"
                       }
+                    },
+                    {
+                      "id": "git",
+                      "type": "block",
+                      "content": {
+                        "mod": "git-log"
+                      }
                     }
                   ],
                   "active": "changes"

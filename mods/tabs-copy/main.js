@@ -20,7 +20,7 @@ function place(sp, ps) {
 }
 // Right-panel blocks that get a header button while they sit in the panel's stack: [node id, label, icon].
 const PANELS = [["files", "Files", "mods/files/file.svg"], ["changes", "Changes", "mods/changes/changes.svg"],
-  ["jira", "Tasks", "mods/jira/jira.svg"], ["prs", "PR", "mods/prs/pr.svg"]];
+  ["jira", "Tasks", "mods/jira/jira.svg"], ["prs", "PR", "mods/prs/pr.svg"], ["git", "Git", "mods/workspace-chrome/git-branch.svg"]];
 const keyOf = (sp, ps) => JSON.stringify([sp?.machine ?? null, place(sp, ps)]);
 
 export default class Tabs extends View {

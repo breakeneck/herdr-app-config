@@ -154,3 +154,9 @@
 - Права кнопка на таску: Copy link (Jira і Trello; у Trello — Open in Trello, Copy link, Copy #id).
 - Заголовок Files фарбується в колір іконки активного проєкту зі списку Spaces.
 - PR: апруви одразу в списку (✓ і кількість; заповнений — якщо апрувнув і ти). Права кнопка: Open in browser, Copy link, Approve / Remove approval (GitLab — обидва, через API зі scope `api`; GitHub — тільки approve через `gh`). Клік — попап з описом, коментарями, рев'ю й апруверами.
+
+## 18. Спільні AI-моделі, AI review у PR, Git-вкладка
+
+- **AI models** (вікно з Changes → Generate ▾ → AI models…, або з PR → AI review ▾): один список моделей на весь застосунок — Claude і Codex (CLI на підписці, запускаються в папці репо на його машині; Codex — `codex exec -m … -s read-only -o <файл>`), або локальний OpenAI-сумісний сервер. Додати / змінити / видалити; для кожного використання свій вибір: **Commit messages** і **PR review**. Логіка в `ai.js` (одна копія в commit-gen, changes-copy, prs; правити в `mods/commit-gen/ai.js`). Стан: shared `ai.models`, `ai.use`. Старі налаштування генерації перенесено в список.
+- **AI review** у попапі PR: кнопка зверху з ▾ (вибір моделі для рев'ю + AI models…). Рев'ю з'являється під описом як чернетка (shared `ai.reviewDrafts`, за url PR): редагуєш, потім Post as comment (GitLab — нотатка через API, GitHub — `gh pr comment`), Regenerate або Discard.
+- **Git** (кнопка в хедері, `mods/git-log`): коміти гілки разом з upstream (↓ вхідні, ↑ вихідні) або всіх гілок, пошук, бейджі гілок і тегів. Fetch, Pull (fast-forward; якщо гілки розійшлись — rebase з autostash, при конфлікті rebase скасовується), Push (без upstream — `push -u origin HEAD`). Клік по коміту — повне повідомлення і файли; клік по файлу — діф цього коміту в головній області (diff-view вміє `commit`). Права кнопка — копіює хеш. Кеш логу по репо, тихий fetch раз на 5 хв.
