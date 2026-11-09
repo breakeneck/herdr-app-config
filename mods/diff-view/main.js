@@ -147,13 +147,13 @@ export default class DiffView extends View {
       .border_1().border_color(t.border).text_color(this.hunks.length ? t.muted : t.dim).tooltip(tip)
       .when(this.hunks.length, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.jump(dir, cx))
-      .child(svg(`mods/workspace-chrome/${icon}.svg`).size(13));
+      .child(svg(`mods/diff-view/icons/${icon}.svg`).size(13));
     const modeBtn = (m, icon, tip) => div().id(`mode-${m}`).w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6)
       .border_1().border_color(t.border).when(this.mode === m, (e) => e.bg(t.selected)).when(this.mode !== m, (e) => e.hover((s) => s.bg(t.hover)))
       .text_color(this.mode === m ? t.foreground : t.muted).tooltip(tip)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { if (this.mode !== m && this.req) { this.mode = m; this.load(this.req, cx); cx.notify(); } })
-      .child(svg(`mods/changes-copy/icons/${icon}.svg`).size(13));
+      .child(svg(`mods/diff-view/icons/${icon}.svg`).size(13));
     const stop = (_e, cx) => cx.stop_propagation();
     const column = (name, width) => div().id(`diff-${name}`).flex_1().min_w(0).h_full().overflow_x_scrollbar()
       .child(div().min_w(width).h_full().relative()
@@ -166,7 +166,7 @@ export default class DiffView extends View {
       // Takes the keyboard on any press, so Alt+↑/↓ reach it.
       .on_mouse_down("left", () => this.handle.focus())
       .child(h_flex().h(42).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
-        .child(svg("mods/changes-copy/icons/diff.svg").size(14).text_color(t.muted))
+        .child(svg("mods/diff-view/icons/diff.svg").size(14).text_color(t.muted))
         .child(div().flex_none().max_w(260).truncate().font_semibold().child(r?.path?.split("/").pop() ?? "Diff"))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(r?.path ?? ""))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(this.hunks.length ? `change ${this.cur >= 0 ? this.cur + 1 : "–"} of ${this.hunks.length}` : ""))
@@ -174,7 +174,7 @@ export default class DiffView extends View {
         .child(modeBtn("file", "file", "Whole file, changes highlighted"))
         .child(nav("diff-prev", "chevron-left", "Previous change (Alt+↑)", -1))
         .child(nav("diff-next", "chevron-right", "Next change (Alt+↓)", 1))
-        .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => run("tab.close", { id: this.tab ?? undefined, confirmed: true })).child(svg("mods/pane/close.svg").size(12))))
+        .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => run("tab.close", { id: this.tab ?? undefined, confirmed: true })).child(svg("mods/diff-view/icons/close.svg").size(12))))
       .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
         .on_size_change((s, cx) => { const h = s.height / z; if (h !== this.viewH) { this.viewH = h; cx.notify(); } })
         .on_hover((hovered) => { if (!hovered) this.thumbDrag = null; })

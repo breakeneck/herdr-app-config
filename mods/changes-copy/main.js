@@ -258,7 +258,7 @@ export default class Changes extends View {
       .text_size(12.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(() => { closeOverlay(props()?.overlay); action(); })
-      .child(svg("mods/workspace-chrome/settings.svg").size(13).text_color(t.muted)).child(label);
+      .child(svg("mods/changes-copy/icons/settings.svg").size(13).text_color(t.muted)).child(label);
     return v_flex().p(6).gap(2).w_full().bg(t.raised).text_color(t.foreground)
       .child(item("gen-settings", "AI models…", openGenSettings));
   }
@@ -342,9 +342,9 @@ export default class Changes extends View {
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
             .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit")?.name ?? "no model"} (${describe(modelFor("commit"))})`)
-              .child(this.generating ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/workspace-chrome/layers.svg").size(12))
+              .child(this.generating ? svg("mods/changes-copy/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/changes-copy/icons/layers.svg").size(12))
               .child(this.generating ? "Generating…" : "Generate"))
-            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 180, props: { menu: true } })).child(svg("mods/workspace-chrome/chevron-down.svg").size(12))))
+            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 180, props: { menu: true } })).child(svg("mods/changes-copy/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           .child(div().id("commit").h(30).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit"))))
       .when(Boolean(ov), (e) => e.child(ov));

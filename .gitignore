@@ -14,7 +14,7 @@ AGENTS.md
 gpui-kit.d.ts
 herdr.d.ts
 frame/
-icons/
+/icons/
 themes/atom-one-dark.json
 themes/win98.json
 mods/*/gpui-kit.d.ts

@@ -198,7 +198,7 @@ export default class RemoteProjects extends View {
       .when(Boolean(this.machine), (el) => el.child(h_flex().px(10).py(8).gap(6).items_center()
         .child(div().id("rp-browse").size(28).flex_none().flex().items_center().justify_center().rounded(7).border_1().border_color(t.input).bg(t.background).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Browse folders on this machine…").on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => openOverlay({ mod: "folder-picker", kind: "dialog", width: 520, height: 480, props: { machine: this.machine, start: this.homes[this.machine] ?? "~" } }))
-          .child(svg("mods/workspace-chrome/folder-plus.svg").size(14)))
+          .child(svg("mods/remote-projects/icons/folder-plus.svg").size(14)))
         .child(Input.new(this.input).flex_1().h(28).px(8).rounded(7).border_1().border_color(t.input)
           .bg(t.background).text_size(12).text_color(t.foreground))))
       .when(Boolean(ov), (el) => el.child(ov));

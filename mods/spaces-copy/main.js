@@ -318,7 +318,7 @@ export default class Spaces extends View {
       const connected = !m || machine?.state === "connected";
       const rebuilt = this.rebuilt(machine) || !!repair;
       const folded = this.folded.has(m);
-      const icon = svg(`mods/workspace-chrome/${m ? "server" : "monitor"}.svg`).size(13).flex_none();
+      const icon = svg(`mods/spaces-copy/icons/${m ? "server" : "monitor"}.svg`).size(13).flex_none();
       const badge = div().absolute().right(-3).bottom(-2).size(6).rounded(3).border_1().border_color(t.chrome).bg(connected ? t.ansi2 : t.dim);
       const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
         .when(collapsed, el => el.mt(4).w(RAIL_CELL).justify_center().rounded(6).tooltip(m ? `${m} · ${connected ? "connected" : (machine?.state ?? "asleep").replace(/_/g, " ")}` : "This computer"))
@@ -342,14 +342,14 @@ export default class Spaces extends View {
           .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
-          .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
+          .child(svg(`mods/spaces-copy/icons/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
       const empty = h_flex().id(`machine-new-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().rounded(7)
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click(() => run("space.new", { machine: m ?? "" }))
         .when(collapsed, el => el.w(RAIL_CELL).rounded(6).justify_center().tooltip(`New space on ${m ?? "this computer"}`)
           .child(h_flex().size(18).rounded(5).border_1().border_color(t.dim).items_center().justify_center()
-            .child(svg("mods/workspace-chrome/plus.svg").size(10))))
-        .when(!collapsed, el => el.child(svg("mods/workspace-chrome/plus.svg").size(12)).child("New space there"));
+            .child(svg("mods/spaces-copy/icons/plus.svg").size(10))))
+        .when(!collapsed, el => el.child(svg("mods/spaces-copy/icons/plus.svg").size(12)).child("New space there"));
       if (!collapsed && rebuilt) return [head];
       const cell = collapsed ? railCell : (el) => el;
       return [cell(head), ...(folded ? [] : mine.length ? mine.map(draw) : [loading(m) ? loadingRow(m) : cell(empty)])];
@@ -428,7 +428,7 @@ export default class Spaces extends View {
         h_flex()
           .gap(9)
           .items_center()
-          .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
+          .when(Boolean(tree), el => el.pl(22).child(svg("mods/spaces-copy/icons/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
@@ -473,7 +473,7 @@ export default class Spaces extends View {
         .when(!collapsed, el => el.child(h_flex().gap(6).items_center().child(S.mark(sec)).child("Spaces")))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click((_e, cx) => { cx.stop_propagation(); run("space.new"); }).child(svg("mods/workspace-chrome/plus.svg").size(14))))
+          .on_click((_e, cx) => { cx.stop_propagation(); run("space.new"); }).child(svg("mods/spaces-copy/icons/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .children(this.grouped(t, collapsed)))

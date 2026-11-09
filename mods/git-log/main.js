@@ -214,14 +214,14 @@ export default class GitLog extends View {
     const tool = (id, label, tip, act, accent = false, spin = false) => h_flex().id(id).h(24).px(7).gap(4).flex_none().items_center().rounded(6).cursor_pointer()
       .border_1().border_color(accent ? t.accent : t.border).text_size(11).text_color(accent ? t.accent : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
       .tooltip(tip).on_click((e, cx) => { cx.stop_propagation(); act(e, cx); })
-      .when(spin, (e) => e.child(svg("mods/workspace-chrome/spinner.svg").size(11).spin(900))).child(label);
+      .when(spin, (e) => e.child(svg("mods/git-log/icons/spinner.svg").size(11).spin(900))).child(label);
     const root = rk ? this.where(rk).root : null;
     return v_flex().id("git-log").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
       .child(S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
         .child(S.mark(sec))
         .child(div().font_semibold().text_size(13).child("Git"))
         .when(Boolean(r?.branch), (e) => e.child(h_flex().min_w(0).gap(4).items_center().text_size(11).text_color(t.muted)
-          .child(svg("mods/workspace-chrome/git-branch.svg").size(12)).child(div().min_w(0).truncate().child(r.branch))
+          .child(svg("mods/git-log/icons/git-branch.svg").size(12)).child(div().min_w(0).truncate().child(r.branch))
           .when(Boolean(r.upstream), (e) => e.child(div().flex_none().text_color(t.dim).child(`→ ${r.upstream}`)))))
         .child(div().flex_1())
         .child(h_flex().id("scope").flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().text_size(10)

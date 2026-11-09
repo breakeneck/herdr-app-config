@@ -177,7 +177,7 @@ export default class BranchPicker extends View {
           .hover(s => s.bg(t.hover))
           .on_click((_e, cx) => this.toggle(r.g, cx))
           .child(div().w(16).text_size(11).text_color(t.dim).child(r.open ? "▾" : "▸"))
-          .child(svg("mods/workspace-chrome/folder.svg").size(13).text_color(t.dim))
+          .child(svg("mods/branch-picker/icons/folder.svg").size(13).text_color(t.dim))
           .child(div().text_color(t.muted).child(r.g))
           .child(div().text_size(11).text_color(t.dim).child(String(r.count)));
       }
@@ -199,10 +199,10 @@ export default class BranchPicker extends View {
         .when(!on, el => el.hover(s => s.bg(t.hover)))
         .tooltip(r.b.name)
         .on_click(() => this.pick(r.b, cx))
-        .child(svg(`mods/workspace-chrome/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
+        .child(svg(`mods/branch-picker/icons/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
         .child(div().flex_1().min_w(0).truncate().text_color(cur ? t.foreground : t.muted).child(r.rest ?? r.b.name))
         .when(cur, el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("current")))
-        .when(busy, el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
+        .when(busy, el => el.child(svg("mods/branch-picker/icons/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(!cur && !busy && r.b.at > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.b.at))));
     };
     return v_flex()

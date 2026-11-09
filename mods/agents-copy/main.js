@@ -163,9 +163,9 @@ export default class Agents extends View {
           setShared("agents.sort", s.id);
           closeOverlay(props().overlay);
         })
-        .child(svg(`mods/workspace-chrome/${s.icon}.svg`).size(14).flex_none().text_color(t.muted))
+        .child(svg(`mods/agents-copy/icons/${s.icon}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().child(s.label))
-        .when(s.id === on, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(14).flex_none().text_color(t.foreground)))));
+        .when(s.id === on, (el) => el.child(svg("mods/agents-copy/icons/check.svg").size(14).flex_none().text_color(t.foreground)))));
   }
 
   peek(addr) {
@@ -213,7 +213,7 @@ export default class Agents extends View {
   // compact: a ! for blocked where a header already says "Needs you".
   status(t, a, compact = false) {
     const color = t[a.status] ?? t.dim;
-    if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
+    if (a.status === "working") return svg("mods/agents-copy/icons/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
     // Idle: a ring; done: a dot.
@@ -278,7 +278,7 @@ export default class Agents extends View {
           open ? this.folded.add(a.address) : this.folded.delete(a.address);
           cx.notify();
         })
-        .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none())
+        .child(svg(`mods/agents-copy/icons/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none())
         .when(!open, (el) => el.child(String(subs.length)));
     };
 
@@ -338,7 +338,7 @@ export default class Agents extends View {
           this.hovered = null;
           cx.notify();
         })
-        .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
+        .child(svg(`mods/agents-copy/icons/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
       const full = byPriority || isPinned;
@@ -411,7 +411,7 @@ export default class Agents extends View {
         .child(div().flex_1())
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
-          .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
+          .child(svg("mods/agents-copy/icons/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
     const rows = collapsed
       ? list.flatMap(withKids)
@@ -446,7 +446,7 @@ export default class Agents extends View {
                 .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
                 .on_click((_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "agents-copy", kind: "popup", width: 200, height: 140, props: { sortMenu: true } }); })
                 .tooltip(`Sort agents: ${sort.label}`)
-                .child(svg(`mods/workspace-chrome/${sort.icon}.svg`).size(14)),
+                .child(svg(`mods/agents-copy/icons/${sort.icon}.svg`).size(14)),
             ),
         ),
       )

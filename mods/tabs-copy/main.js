@@ -19,8 +19,8 @@ function place(sp, ps) {
     ?? ps.find(p => tabs.has(p.tab) && p.cwd)?.cwd ?? sp?.folder ?? null;
 }
 // Right-panel blocks that get a header button while they sit in the panel's stack: [node id, label, icon].
-const PANELS = [["files", "Files", "mods/files/file.svg"], ["changes", "Changes", "mods/changes/changes.svg"],
-  ["jira", "Tasks", "mods/jira/jira.svg"], ["prs", "PR", "mods/prs/pr.svg"], ["git", "Git", "mods/workspace-chrome/git-branch.svg"]];
+const PANELS = [["files", "Files", "mods/tabs-copy/icons/file.svg"], ["changes", "Changes", "mods/tabs-copy/icons/changes.svg"],
+  ["jira", "Tasks", "mods/tabs-copy/icons/jira.svg"], ["prs", "PR", "mods/tabs-copy/icons/pr.svg"], ["git", "Git", "mods/tabs-copy/icons/git-branch.svg"]];
 const keyOf = (sp, ps) => JSON.stringify([sp?.machine ?? null, place(sp, ps)]);
 
 export default class Tabs extends View {
@@ -127,9 +127,9 @@ export default class Tabs extends View {
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
-        .when(c.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
+        .when(c.status === "working", el => el.child(svg("mods/tabs-copy/icons/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
-        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/pane/close.svg").size(12))));
+        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/tabs-copy/icons/close.svg").size(12))));
     };
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
@@ -159,7 +159,7 @@ export default class Tabs extends View {
       .hover(s => s.bg(editing ? t.accent : t.hover)).on_mouse_down("left", stop)
       .tooltip(editing ? "Done: stop moving blocks" : "Edit layout: drag blocks by their title to move them")
       .on_click(() => { setShared("layout.drag", null); setShared("layout.edit", !editing); })
-      .child(svg("mods/workspace-chrome/square-pen.svg").size(14)).child(editing ? "Done" : "Edit layout");
+      .child(svg("mods/tabs-copy/icons/square-pen.svg").size(14)).child(editing ? "Done" : "Edit layout");
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next") })
@@ -170,7 +170,7 @@ export default class Tabs extends View {
                 .on_mouse_down("left", stop)
                 .tooltip(`Branch ${branch}${g.ahead || g.behind ? ` · ↑${g.ahead} ↓${g.behind}` : ""} — click to switch`)
                 .on_click(() => openOverlay({ mod: "branch-picker", kind: "popup", width: 460, height: 560, props: { space: sid } }))
-                .child(svg("mods/workspace-chrome/git-branch.svg").size(13).text_color(t.muted))
+                .child(svg("mods/tabs-copy/icons/git-branch.svg").size(13).text_color(t.muted))
                 .child(div().max_w(180).truncate().text_color(t.foreground).child(branch))
                 .when(Boolean(g.ahead || g.behind), el => el.child(
                   div().text_size(11).text_color(t.dim).child(`${g.ahead ? `↑${g.ahead}` : ""}${g.behind ? ` ↓${g.behind}` : ""}`))),
@@ -182,6 +182,6 @@ export default class Tabs extends View {
       .child(editButton)
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-copy/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-copy/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
-        .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-copy/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
+        .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-copy/win-close.svg").size(16) : svg("mods/tabs-copy/icons/close.svg").size(13), () => run("window.close"))));
   }
 }
