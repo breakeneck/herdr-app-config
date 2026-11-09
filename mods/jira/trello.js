@@ -1,12 +1,13 @@
 // Trello inside the Tasks (jira) panel: a project whose source is Trello shows its board here,
 // the board's lists as columns (board order, card order), All / Mine, drag a card onto another
 // list to move it, click a card for the whole card in a popup.
-// The API key and token live in the macOS Keychain (service herdr-trello, account = the key);
-// which board belongs to which project is in shared state ("tasks.sources", see main.js).
+// Accounts: shared "tasks.accounts".trello = [{ id (Trello member id), name, username }] (no secrets);
+// each one's "key:token" in the macOS Keychain (service herdr-trello, account = member id).
+// Which account and board a project uses is in shared "tasks.sources" (see main.js).
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { exec, props, closeOverlay } from "herdr";
+import { exec, props, closeOverlay, shared, setShared } from "herdr";
 
 const SERVICE = "herdr-trello";
 const API = "https://api.trello.com/1";
@@ -19,13 +20,22 @@ const labelColor = (c) => LABEL[String(c ?? "").replace(/_(dark|light)$/, "")] ?
 const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== null)
   .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
 
-async function credentials() {
-  const [item, token] = await Promise.all([
-    exec("security", ["find-generic-password", "-s", SERVICE]),
-    exec("security", ["find-generic-password", "-s", SERVICE, "-w"]),
-  ]);
-  const key = /"acct"<blob>="([^"]*)"/.exec(item.stdout)?.[1];
-  return token.code === 0 && key ? { key, token: token.stdout.trim() } : null;
+const ACCOUNTS = "tasks.accounts";
+export const trelloAccounts = () => (shared(ACCOUNTS) ?? {}).trello ?? [];
+export const trelloAccount = (id) => trelloAccounts().find((a) => a.id === id) ?? null;
+function upsertAccount(acc) {
+  const all = shared(ACCOUNTS) ?? {}, list = all.trello ?? [];
+  setShared(ACCOUNTS, { ...all, trello: list.some((a) => a.id === acc.id) ? list.map((a) => (a.id === acc.id ? acc : a)) : [...list, acc] });
+}
+async function credentials(id) {
+  const r = await exec("security", ["find-generic-password", "-s", SERVICE, "-a", id, "-w"]);
+  const v = r.code === 0 ? r.stdout.trim() : "", at = v.indexOf(":");
+  return at > 0 ? { key: v.slice(0, at), token: v.slice(at + 1) } : null;
+}
+async function keep(id, key, token) {
+  // ponytail: -w puts the secret in `security`'s argv for a moment (local ps only).
+  const r = await exec("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", id, "-w", `${key}:${token}`]);
+  if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
 }
 
 async function call(creds, path, query = {}, method = "GET") {
@@ -43,8 +53,8 @@ export class Trello {
   // `view` is the panel (main.js): drag state (press / dragging / over) and notify go through it.
   constructor(view) {
     this.view = view;
-    this.creds = undefined; // undefined: not asked yet; null: not connected
-    this.me = ls.get("trello:me", null);
+    this.account = null; // the Trello account (member id) shown now
+    this.credsBy = {}; // member id -> { key, token } | null (no token saved); absent: not asked yet
     this.boards = null; this.boardsError = null;
     this.lists = {}; this.at = {}; this.loading = new Set(); this.error = null;
     this.mine = ls.get("trello:mine", false);
@@ -54,10 +64,32 @@ export class Trello {
     this.tokenInput.set_masked(true);
   }
 
+  get creds() { return this.account ? this.credsBy[this.account] : null; }
+  set creds(v) { if (this.account) this.credsBy[this.account] = v; }
+
   async ready() {
-    if (this.creds === undefined) this.creds = await credentials();
-    return this.creds;
+    const id = this.account;
+    if (!id) return null;
+    if (!(id in this.credsBy)) this.credsBy[id] = await credentials(id);
+    return this.credsBy[id];
   }
+
+  // The first build kept one key + token with the key as the Keychain account: make it an account.
+  async migrate() {
+    if (trelloAccounts().length) return null;
+    const [item, token] = await Promise.all([exec("security", ["find-generic-password", "-s", SERVICE]), exec("security", ["find-generic-password", "-s", SERVICE, "-w"])]);
+    const key = /"acct"<blob>="([^"]*)"/.exec(item.stdout)?.[1];
+    if (token.code !== 0 || !/^[0-9a-f]{32}$/i.test(key ?? "")) return null;
+    try {
+      const me = await call({ key, token: token.stdout.trim() }, "/members/me", { fields: "id,fullName,username" });
+      await keep(me.id, key, token.stdout.trim());
+      upsertAccount({ id: me.id, name: me.fullName || me.username, username: me.username });
+      return me.id;
+    } catch { return null; }
+  }
+
+  // The form for a new account (or a new token for one): empty fields.
+  startAdd() { this.keyInput.set_value(""); this.tokenInput.set_value(""); this.formError = null; }
 
   // The board's lists with their cards: from the cache at once, from Trello when stale.
   show(boardId, cx, force = false) {
@@ -73,7 +105,6 @@ export class Trello {
       try {
         const creds = await this.ready();
         if (!creds) return;
-        if (!this.me) { this.me = await call(creds, "/members/me", { fields: "id,fullName,username" }); ls.set("trello:me", this.me); }
         const lists = await call(creds, `/boards/${boardId}/lists`, { filter: "open", fields: "name,pos", cards: "open",
           card_fields: "name,idMembers,labels,pos,due,dueComplete,idShort,shortUrl" });
         this.lists[boardId] = lists; this.at[boardId] = Date.now(); this.error = null;
@@ -121,13 +152,14 @@ export class Trello {
     this.saving = true; this.formError = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
-        this.me = await call({ key, token }, "/members/me", { fields: "id,fullName,username" });
-        await exec("security", ["delete-generic-password", "-s", SERVICE]);
-        // ponytail: -w puts the token in `security`'s argv for a moment (local ps only).
-        const r = await exec("security", ["add-generic-password", "-s", SERVICE, "-a", key, "-w", token]);
-        if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
-        ls.set("trello:me", this.me);
-        this.creds = { key, token }; this.tokenInput.set_value("");
+        // The account is whoever the token belongs to: the same login twice updates one account.
+        const me = await call({ key, token }, "/members/me", { fields: "id,fullName,username" });
+        await keep(me.id, key, token);
+        upsertAccount({ id: me.id, name: me.fullName || me.username, username: me.username });
+        this.credsBy[me.id] = { key, token }; this.tokenInput.set_value("");
+        this.view.trelloForm = false;
+        const src = this.view.source();
+        this.view.setSource({ kind: "trello", account: me.id, board: src.kind === "trello" && src.account === me.id ? src.board : null }, cx);
       } catch (e) { this.formError = e.status === 401 ? "Trello rejected this key + token" : String(e.message ?? e); }
       finally { this.saving = false; cx.notify(); }
     });
@@ -141,7 +173,9 @@ export class Trello {
       .child(div().id(id).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(state).h_full().w_full().text_size(12).text_color(t.foreground)));
     return v_flex().p(8).gap(8).text_color(t.muted)
-      .child(div().text_color(t.foreground).font_semibold().child("Connect Trello"))
+      .child(h_flex().items_center().child(div().flex_1().text_color(t.foreground).font_semibold().child("Add a Trello account"))
+        .child(div().id("tr-cancel").text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => { this.view.trelloForm = false; cx.notify(); }).child("Cancel")))
       .child(div().text_size(11).child("1. Open the Power-Up admin, make (or open) a Power-Up and copy its API key. 2. Get token: Allow, then copy the token."))
       .child(field("tr-key", "API key", this.keyInput))
       .child(h_flex().gap(6)
@@ -177,7 +211,8 @@ export class Trello {
     return (this.lists[boardId] ?? []).reduce((n, l) => n + this.visible(l).length, 0);
   }
   visible(list, q = "") {
-    return list.cards.filter((c) => (!this.mine || c.idMembers.includes(this.me?.id))
+    // The account id is the Trello member id.
+    return list.cards.filter((c) => (!this.mine || c.idMembers.includes(this.account))
       && (!q || c.name.toLowerCase().includes(q) || `#${c.idShort}` === q));
   }
 

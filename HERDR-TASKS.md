@@ -145,3 +145,12 @@
 - Trello (`mods/jira/trello.js`): підключення — API key (Power-Up admin) + token (кнопка Get token), у Keychain `herdr-trello`. Списки дошки як колонки (порядок дошки й карток), All / Mine, перетягування картки на інший список (`PUT /cards/{id}?idList=…&pos=top`), клік — попап з описом (markdown), чеклістами й коментарями. Дошку проєкту змінює чип з назвою дошки.
 - Гаряче оновлення: Jira-список і колонки кешуються (`localStorage jira:cache`), Trello — кожна дошка (`trello:board:<id>`); при перемиканні проєкту панель одразу показує кеш і оновлює у фоні, якщо він старший за 30 с.
 - Коміт-меседж: у вікні налаштувань генерації поле **Template** (формат, який просимо в моделі; дефолт — перший рядок ≤72 символи, далі пункти «- …» без порожніх рядків) і галочка **No blank lines** (за замовчуванням увімкнена: порожні рядки прибираються з відповіді моделі).
+
+## 17. Акаунти в Tasks, Copy link, колір проєкту, PR: апруви / меню / попап
+
+- **Tasks, акаунти.** Кілька Jira- і Trello-акаунтів (різні email/сайти): shared `tasks.accounts` = `{ jira: [{ id: "<host>|<email>", site, email, base, project }], trello: [{ id: <member id>, name, username }] }` — без секретів; токени в Keychain (`herdr-jira` / `herdr-trello`, account = id акаунта; для Trello значення `key:token`). Проєкт (репо за origin) пам'ятає `{ kind: none | jira | trello, account, board }` у `tasks.sources`.
+- Чип у заголовку панелі (іконка + акаунт, ▾) відкриває вибір: збережені акаунти Jira і Trello (без повторного логіну), «Add Jira account», «Add Trello account», «Not connected». Новий проєкт — «Connect…» (вибір). Той самий сайт+email чи той самий Trello-користувач оновлює існуючий акаунт, а не створює другий. ⚙ — редагування акаунта проєкту (project key, новий токен).
+- Стан і кеш Jira — окремо для кожного акаунта (`jira:cache:<id>`). Міграція: старий єдиний Jira-логін став акаунтом, усі вже бачені проєкти лишились на ньому; старий Trello-логін — акаунтом Trello.
+- Права кнопка на таску: Copy link (Jira і Trello; у Trello — Open in Trello, Copy link, Copy #id).
+- Заголовок Files фарбується в колір іконки активного проєкту зі списку Spaces.
+- PR: апруви одразу в списку (✓ і кількість; заповнений — якщо апрувнув і ти). Права кнопка: Open in browser, Copy link, Approve / Remove approval (GitLab — обидва, через API зі scope `api`; GitHub — тільки approve через `gh`). Клік — попап з описом, коментарями, рев'ю й апруверами.

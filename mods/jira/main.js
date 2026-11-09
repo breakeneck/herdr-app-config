@@ -2,15 +2,16 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-base";
 import { exec, theme, shared, setShared, props, openOverlay, closeOverlay, spaces, panes, focused } from "herdr";
 import * as S from "./section.js";
-import { Trello } from "./trello.js";
+import { Trello, trelloAccount } from "./trello.js";
 import { Buffer } from "buffer";
 
 // My open Jira issues grouped by their board's columns ("folders": To Do, In Progress, ...), in the
 // board's column order and rank order within a column, like the board itself; plus the project's backlog.
 // Click selects an issue; drag it onto another column to move it there (a Jira transition);
 // right-click: Go to Jira, Copy key.
-// Settings (site, project) live in Herdr's shared state ("jira.settings"); the email and API token
-// in the macOS Keychain (service herdr-jira, account = email). Nothing personal is in this repo.
+// Accounts: shared "tasks.accounts".jira = [{ id: "<host>|<email>", site, email, base, project }] (no
+// secrets); each one's API token in the macOS Keychain (service herdr-jira, account = that id).
+// Nothing personal is in this repo.
 // ponytail: an API token, not OAuth — OAuth needs a registered app with a secret and a local
 // redirect server, which a mod can't host.
 const TOKEN_PAGE = "https://id.atlassian.com/manage-profile/security/api-tokens";
@@ -21,15 +22,21 @@ const SETTINGS = "jira.settings";
 
 const basic = (email, token) => "Basic " + Buffer.from(`${email}:${token}`).toString("base64");
 
-// The saved email and auth header, or null.
-async function credentials() {
-  const [item, token] = await Promise.all([
-    exec("security", ["find-generic-password", "-s", SERVICE]),
-    exec("security", ["find-generic-password", "-s", SERVICE, "-w"]),
-  ]);
-  const email = /"acct"<blob>="([^"]*)"/.exec(item.stdout)?.[1];
-  if (token.code !== 0 || !email) return null;
-  return { email, auth: basic(email, token.stdout.trim()) };
+// Jira accounts (several logins: different emails, different sites).
+const ACCOUNTS = "tasks.accounts";
+const jiraAccounts = () => (shared(ACCOUNTS) ?? {}).jira ?? [];
+const jiraAccount = (id) => jiraAccounts().find((a) => a.id === id) ?? null;
+const jiraId = (site, email) => `${site.replace(/^https?:\/\//, "")}|${email.toLowerCase()}`;
+function upsertJira(acc) {
+  const all = shared(ACCOUNTS) ?? {}, list = all.jira ?? [];
+  setShared(ACCOUNTS, { ...all, jira: list.some((a) => a.id === acc.id) ? list.map((a) => (a.id === acc.id ? acc : a)) : [...list, acc] });
+}
+
+// An account's email and auth header, or null (no token saved for it).
+async function credentials(acc) {
+  if (!acc) return null;
+  const r = await exec("security", ["find-generic-password", "-s", SERVICE, "-a", acc.id, "-w"]);
+  return r.code === 0 ? { email: acc.email, auth: basic(acc.email, r.stdout.trim()) } : null;
 }
 
 async function jira(base, auth, path, body) {
@@ -139,18 +146,14 @@ const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle:
 export default class Jira extends View {
   init(_props, cx) {
     // Opened as a popup for one issue (click on a row): show it whole, nothing else.
-    if (props()?.issue) { this.detailKey = props().issue; this.loadDetail(cx); return; }
-    if (props()?.trelloCard) { this.trello = new Trello(this); this.cardPopup = true; this.trello.loadCard(props().trelloCard, cx); return; }
-    this.groups = []; this.backlog = []; this.count = 0; this.error = null; this.loading = false;
-    this.columns = {}; // project key -> board columns (asked once per session)
+    if (props()?.issue) { this.detailKey = props().issue; this.detailAcc = jiraAccount(props().account); this.loadDetail(cx); return; }
+    if (props()?.trelloCard) { this.trello = new Trello(this); this.trello.account = props().account; this.cardPopup = true; this.trello.loadCard(props().trelloCard, cx); return; }
+    this.jst = {}; // Jira account id -> its list state (issues, columns, ...), see st()
     this.trello = new Trello(this);
     this.remotes = new Map(store.get("remotes", [])); // `${on}|${cwd}` -> repo key
-    this.loc = null; this.repo = null; this.picking = false; this.trelloForm = false;
-    // Hot start: the last Jira list (and its board columns) from the cache, refreshed in the background.
-    const c = store.get("jira:cache", null);
-    if (c) { this.columns = c.columns ?? {}; this.issues = c.issues ?? []; this.groups = this.group(this.issues); this.backlog = c.backlog ?? []; this.count = this.issues.length; this.at = c.at; }
+    this.loc = null; this.repo = null; this.picking = false; this.trelloForm = false; this.choosing = false; this.jform = null;
     this.press = null; this.dragging = false; // a pressed issue row, and whether it's being dragged
-    this.setup = false; this.editing = false; this.saving = false; this.formError = null; this.savedEmail = null; this.query = "";
+    this.saving = false; this.formError = null; this.query = "";
     const input = (placeholder) => { const s = InputState.new({ placeholder }); s.on("submit", (_e, cx) => this.save(cx)); return s; };
     this.site = input("https://your-company.atlassian.net");
     this.project = input("Project key for the backlog, e.g. DA");
@@ -159,24 +162,72 @@ export default class Jira extends View {
     this.token.set_masked(true);
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
-    this.follow(cx);
-    this.refresh(cx);
+    cx.spawn(async (cx) => { await this.migrate(); this.loc = null; this.follow(cx); });
     cx.timer.every(2000, (cx) => this.follow(cx)); // a `cd` in a terminal; render catches space switches
-    cx.timer.every(2 * 60 * 1000, (cx) => { const src = this.source(); if (src.kind === "trello") { if (src.board) this.trello.refresh(src.board.id, cx); } else this.refresh(cx); });
+    cx.timer.every(2 * 60 * 1000, (cx) => {
+      const src = this.source();
+      if (src.kind === "trello") { if (src.board) this.trello.refresh(src.board.id, cx); } else if (src.kind === "jira") this.refresh(cx, src.account);
+    });
   }
 
-  source() { return (this.repo && (shared("tasks.sources") ?? {})[this.repo]) || { kind: "jira" }; }
+  // Where this project's tasks come from: { kind: "none" | "jira" | "trello", account, board? }.
+  // Unknown projects, and ones whose account is gone, are "none" (the chooser).
+  source() {
+    const s = (this.repo && (shared("tasks.sources") ?? {})[this.repo]) || { kind: "none" };
+    if (s.kind === "jira" && !jiraAccount(s.account)) return { kind: "none" };
+    if (s.kind === "trello" && !trelloAccount(s.account)) return { kind: "none" };
+    return s;
+  }
   setSource(next, cx) {
     if (!this.repo) return;
     setShared("tasks.sources", { ...(shared("tasks.sources") ?? {}), [this.repo]: next });
-    this.picking = false; this.activate(cx);
+    this.picking = false; this.choosing = false; this.jform = null; this.trelloForm = false;
+    this.activate(cx);
+  }
+
+  // One Jira account's list state; its cached list (localStorage) shows at once.
+  st(id) {
+    const k = id ?? "-";
+    if (!this.jst[k]) {
+      const c = id ? store.get(`jira:cache:${id}`, null) : null;
+      const st = { issues: c?.issues ?? [], backlog: c?.backlog ?? [], columns: c?.columns ?? {}, at: c?.at ?? 0, verified: false, error: null, loading: false };
+      st.groups = this.group(st.issues, st.columns); st.count = st.issues.length;
+      this.jst[k] = st;
+    }
+    return this.jst[k];
+  }
+
+  // The first builds had one Jira login (jira.settings + a Keychain item named by the email) and
+  // Jira as every project's default: that login becomes an account, and every project already seen
+  // stays on it. An old single Trello login becomes a Trello account the same way.
+  async migrate() {
+    const sources = { ...(shared("tasks.sources") ?? {}) };
+    if (!jiraAccounts().length) {
+      const s = shared(SETTINGS);
+      const [item, token] = await Promise.all([exec("security", ["find-generic-password", "-s", SERVICE]), exec("security", ["find-generic-password", "-s", SERVICE, "-w"])]);
+      const email = /"acct"<blob>="([^"]*)"/.exec(item.stdout)?.[1];
+      if (s?.site && email && !email.includes("|") && token.code === 0) {
+        const id = jiraId(s.site, email);
+        const r = await exec("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", id, "-w", token.stdout.trim()]);
+        if (r.code === 0) {
+          upsertJira({ id, site: s.site, email, base: s.base ?? s.site, project: s.project ?? "" });
+          const old = store.get("jira:cache", null);
+          if (old) store.set(`jira:cache:${id}`, old);
+          for (const [k, v] of Object.entries(sources)) if (v.kind === "jira" && !v.account) sources[k] = { kind: "jira", account: id };
+          for (const repo of new Set(this.remotes.values())) if (!sources[repo]) sources[repo] = { kind: "jira", account: id };
+        }
+      }
+    }
+    const trelloId = await this.trello.migrate();
+    if (trelloId) for (const [k, v] of Object.entries(sources)) if (v.kind === "trello" && !v.account) sources[k] = { ...v, account: trelloId };
+    setShared("tasks.sources", sources);
   }
 
   // The focused place moved: find its repo (cached), then show its source at once.
   follow(cx) {
     const loc = location(), lk = `${loc.on}|${loc.cwd}`;
     if (lk === this.loc) return;
-    this.loc = lk;
+    this.loc = lk; this.choosing = false; this.picking = false;
     if (this.remotes.has(lk)) { this.repo = this.remotes.get(lk); this.activate(cx); return; }
     if (!loc.cwd) { this.repo = null; this.activate(cx); return; }
     cx.spawn(async (cx) => {
@@ -190,10 +241,14 @@ export default class Jira extends View {
   activate(cx) {
     const src = this.source();
     if (src.kind === "trello") {
+      this.trello.account = src.account;
       this.trello.ready().then(() => cx.notify());
       if (src.board) this.trello.show(src.board.id, cx);
-      else if (!this.trello.boards) this.trello.loadBoards(cx);
-    } else if (!this.loading && Date.now() - (this.at ?? 0) > STALE) this.refresh(cx);
+      else this.trello.loadBoards(cx);
+    } else if (src.kind === "jira") {
+      const st = this.st(src.account);
+      if (!st.loading && Date.now() - st.at > STALE) this.refresh(cx, src.account);
+    }
     cx.notify();
   }
 
@@ -201,61 +256,55 @@ export default class Jira extends View {
     if (hovered) { if (this.over !== id) { this.over = id; if (this.dragging) cx.notify(); } }
     else if (this.over === id) { this.over = null; if (this.dragging) cx.notify(); }
   }
-  openTrelloCard(id) { openOverlay({ mod: "jira", kind: "dialog", width: 760, height: 0.85, props: { trelloCard: id } }); }
+  openTrelloCard(id) { openOverlay({ mod: "jira", kind: "dialog", width: 760, height: 0.85, props: { trelloCard: id, account: this.trello.account } }); }
 
-  settings() { return shared(SETTINGS) ?? {}; }
-
-  // Fills the form from what is saved; the token field stays empty (empty = keep the saved one).
-  fillForm() {
-    const s = this.settings();
-    this.site.set_value(s.site ?? ""); this.project.set_value(s.project ?? ""); this.email.set_value(this.savedEmail ?? "");
+  // The Jira account form: "add" (empty) or "edit" the project's account (project key, a new token).
+  openJiraForm(mode, cx) {
+    const acc = mode === "edit" ? jiraAccount(this.source().account) : null;
+    this.jform = { mode, id: acc?.id ?? null }; this.choosing = false; this.trelloForm = false;
+    this.site.set_value(acc?.site ?? ""); this.project.set_value(acc?.project ?? ""); this.email.set_value(acc?.email ?? "");
     this.token.set_value(""); this.formError = null;
+    cx.notify();
   }
 
-  openSettings(cx) { this.fillForm(); this.editing = !this.editing; cx.notify(); }
-
-  refresh(cx) {
-    if (this.loading) return;
-    this.loading = true; cx.notify();
+  refresh(cx, id = this.source().account) {
+    const acc = jiraAccount(id);
+    if (!acc) return;
+    const st = this.st(id);
+    if (st.loading) return;
+    st.loading = true; cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const creds = await credentials(), s = this.settings();
-        this.savedEmail = creds?.email ?? null;
-        if (!creds || !s.site) {
-          if (!this.setup) { this.setup = true; this.fillForm(); }
-          this.groups = []; this.backlog = []; this.count = 0; return;
-        }
-        this.setup = false;
+        const creds = await credentials(acc);
+        if (!creds) { st.error = "No token saved for this account · edit it (⚙) to paste one"; return; }
         // Once per session: a token that stopped working would otherwise look like "no issues".
-        if (!this.verified) {
-          const base = await findBase(s.site, creds.auth); this.verified = true;
-          if (base !== s.base) setShared(SETTINGS, { ...s, base });
+        if (!st.verified) {
+          const base = await findBase(acc.site, creds.auth); st.verified = true;
+          if (base !== acc.base) upsertJira({ ...acc, base });
         }
-        const base = this.settings().base ?? s.site;
+        const base = jiraAccount(id)?.base ?? acc.site, project = acc.project;
         // ponytail: first 100 of mine and 50 of the backlog; page with nextPageToken if that's ever too few.
         const fields = ["summary", "status", "issuetype", "labels", "project"];
         const search = (jql, fields, maxResults) => jira(base, creds.auth, "/rest/api/3/search/jql", { jql, fields, maxResults });
         const [{ issues = [] }, { issues: backlog = [] }] = await Promise.all([
           search(MINE_JQL, fields, 100),
-          s.project ? search(backlogJql(s.project), ["summary", "status", "issuetype", "labels"], 50) : { issues: [] },
+          project ? search(backlogJql(project), ["summary", "status", "issuetype", "labels"], 50) : { issues: [] },
         ]);
         for (const key of new Set(issues.map((i) => i.fields.project?.key).filter(Boolean))) {
-          if (!(key in this.columns)) this.columns[key] = await boardColumns(base, creds.auth, key).catch(() => null);
+          if (!(key in st.columns)) st.columns[key] = await boardColumns(base, creds.auth, key).catch(() => null);
         }
-        this.issues = issues; this.groups = this.group(issues);
-        this.backlog = backlog; this.count = issues.length; this.error = null; this.at = Date.now();
-        store.set("jira:cache", { issues, columns: this.columns, backlog, at: this.at });
+        st.issues = issues; st.groups = this.group(issues, st.columns);
+        st.backlog = backlog; st.count = issues.length; st.error = null; st.at = Date.now();
+        store.set(`jira:cache:${id}`, { issues, columns: st.columns, backlog, at: st.at });
       } catch (e) {
-        // A revoked or expired token: back to the form.
-        if (e.status === 401) {
-          this.setup = true; this.verified = false; this.groups = []; this.backlog = []; this.count = 0;
-          this.fillForm(); this.formError = "Jira rejected the saved token · paste a new one";
-        } else this.error = String(e.message ?? e);
-      } finally { this.loading = false; cx.notify(); }
+        if (e.status === 401) { st.verified = false; st.error = "Jira rejected this account's token · edit it (⚙) to paste a new one"; }
+        else st.error = String(e.message ?? e);
+      } finally { st.loading = false; cx.notify(); }
     });
   }
 
-  // Checks the form against Jira, then saves: settings to shared state, a new token to the Keychain.
+  // Checks the form against Jira, then saves the account (the same site + email updates it, never
+  // a second login) and puts this project on it.
   save(cx) {
     if (this.saving) return;
     const site = normalizeSite(this.site.value()), project = this.project.value().trim().toUpperCase();
@@ -264,42 +313,69 @@ export default class Jira extends View {
     if (!/^https:\/\/[^\s/]+$/.test(site)) return fail("Jira URL: https://<name>.atlassian.net");
     if (project && !/^[A-Z][A-Z0-9_]*$/.test(project)) return fail("Project key: letters, digits and _ (like DA)");
     if (!/^\S+@\S+\.\S+$/.test(email)) return fail("Enter your Atlassian email");
-    // The saved token belongs to the saved email; a different email needs its own token.
-    const needToken = !this.savedEmail || email !== this.savedEmail;
-    if (token ? /\s/.test(token) || token.length < 20 : needToken) return fail("Paste the API token (Open token page → Create API token → Copy)");
+    const id = jiraId(site, email), existing = jiraAccount(id);
+    if (token ? /\s/.test(token) || token.length < 20 : !existing) return fail("Paste the API token (Open token page → Create API token → Copy)");
     this.saving = true; this.formError = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const auth = token ? basic(email, token) : (await credentials())?.auth;
+        const auth = token ? basic(email, token) : (await credentials(existing))?.auth;
         if (!auth) throw new Error("No saved token · paste one");
         const base = await findBase(site, auth);
         if (token) {
-          await exec("security", ["delete-generic-password", "-s", SERVICE]);
           // ponytail: -w puts the token in `security`'s argv for a moment (local ps only); its prompt can't be driven from a mod.
-          const r = await exec("security", ["add-generic-password", "-s", SERVICE, "-a", email, "-w", token]);
+          const r = await exec("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", id, "-w", token]);
           if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
-          this.savedEmail = email; this.token.set_value("");
+          this.token.set_value("");
         }
-        setShared(SETTINGS, { site, project, base });
-        this.verified = true; this.setup = false; this.editing = false;
+        upsertJira({ id, site, email, base, project });
+        delete this.jst[id];
+        this.setSource({ kind: "jira", account: id }, cx);
+        this.refresh(cx, id);
       } catch (e) {
         this.formError = e.status === 401 || e.status === 403
           ? `Jira rejected these credentials (${e.message}). Check the URL and email; a token with scopes needs read:jira-work and read:jira-user.`
           : String(e.message ?? e);
       } finally { this.saving = false; cx.notify(); }
-      if (!this.setup && !this.editing) this.refresh(cx);
     });
+  }
+
+  // Which account this project's tasks come from: the logins already saved, a new one, or none.
+  chooserView(t, repoName, src) {
+    const row = (id, icon, label, sub, on, act) => h_flex().id(id).h(28).flex_none().px(8).gap(8).items_center().rounded(5).cursor_pointer()
+      .when(on, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click(act)
+      .child(svg(icon).size(13).text_color(t.dim)).child(div().flex_1().min_w(0).truncate().child(label))
+      .child(div().flex_none().max_w(160).truncate().text_size(10).text_color(t.dim).child(sub))
+      .when(on, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child("✓")));
+    const add = (id, label, act) => h_flex().id(id).h(26).flex_none().px(8).gap(8).items_center().rounded(5).cursor_pointer()
+      .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(act).child(div().w(13).child("+")).child(label);
+    const head = (text) => div().px(8).pt(10).pb(2).text_size(10).font_semibold().text_color(t.dim).child(text);
+    const tAccounts = (shared(ACCOUNTS) ?? {}).trello ?? [];
+    return v_flex().p(6).gap(1)
+      .child(div().px(8).py(4).text_size(12).text_color(this.repo ? t.foreground : t.dim)
+        .child(this.repo ? `Tasks for ${repoName}` : "Open a project folder to choose where its tasks come from"))
+      .when(Boolean(this.repo), (e) => e
+        .child(head("JIRA"))
+        .children(jiraAccounts().map((a) => row(`ja-${a.id}`, "mods/jira/jira.svg", a.email, a.site.replace(/^https?:\/\//, ""),
+          src.kind === "jira" && src.account === a.id, (_e, cx) => this.setSource({ kind: "jira", account: a.id }, cx))))
+        .child(add("ja-add", "Add Jira account", (_e, cx) => this.openJiraForm("add", cx)))
+        .child(head("TRELLO"))
+        .children(tAccounts.map((a) => row(`ta-${a.id}`, "mods/jira/trello.svg", a.name, a.username ? `@${a.username}` : "",
+          src.kind === "trello" && src.account === a.id,
+          (_e, cx) => this.setSource({ kind: "trello", account: a.id, board: src.kind === "trello" && src.account === a.id ? src.board : null }, cx))))
+        .child(add("ta-add", "Add Trello account", (_e, cx) => { this.trello.startAdd(); this.trelloForm = true; this.choosing = false; this.jform = null; cx.notify(); }))
+        .child(head("OR"))
+        .child(row("src-none", "mods/jira/settings.svg", "Not connected", "", src.kind === "none", (_e, cx) => this.setSource({ kind: "none" }, cx))));
   }
 
   // Board columns per project (projects with the most of my issues first). Issues keep Jira's rank
   // order inside a column. Every column is listed, even an empty one: it is somewhere to drop.
   // A status no column maps (a board without it) gets a group of its own at the end.
-  group(issues) {
+  group(issues, columns) {
     const byProject = new Map();
     for (const i of issues) { const k = i.fields.project?.key ?? "?"; if (!byProject.has(k)) byProject.set(k, []); byProject.get(k).push(i); }
     const many = byProject.size > 1, groups = [];
     for (const [project, list] of [...byProject].sort((a, b) => b[1].length - a[1].length)) {
-      const cols = this.columns[project] ?? [];
+      const cols = columns[project] ?? [];
       const mine = cols.map((c) => ({ id: `${project}:${c.name}`, project, name: many ? `${project} · ${c.name}` : c.name, statuses: c.statuses, issues: [] }));
       for (const i of list) {
         const sid = String(i.fields.status?.id ?? "");
@@ -321,7 +397,7 @@ export default class Jira extends View {
     this.detail = null; this.detailError = null;
     cx.spawn(async (cx) => {
       try {
-        const creds = await credentials(), s = this.settings(), base = s.base ?? s.site;
+        const acc = this.detailAcc, creds = await credentials(acc), base = acc?.base ?? acc?.site;
         if (!creds || !base) throw new Error("Jira isn't connected");
         const f = "summary,status,issuetype,priority,assignee,reporter,labels,description,comment,created,updated,parent,project";
         this.detail = await jira(base, creds.auth, `/rest/api/3/issue/${encodeURIComponent(this.detailKey)}?fields=${f}`);
@@ -331,7 +407,7 @@ export default class Jira extends View {
   }
 
   detailView(t) {
-    const d = this.detail, f = d?.fields ?? {}, key = this.detailKey, url = `${this.settings().site}/browse/${key}`;
+    const d = this.detail, f = d?.fields ?? {}, key = this.detailKey, url = `${this.detailAcc?.site}/browse/${key}`;
     const close = () => closeOverlay(props()?.overlay);
     const cat = f.status?.statusCategory?.key, tone = cat === "indeterminate" ? t.working : cat === "done" ? t.done : t.muted;
     const btn = (id, label, act) => div().id(id).h(26).px(10).flex().items_center().rounded(6).border_1().border_color(t.border).text_size(12)
@@ -370,11 +446,12 @@ export default class Jira extends View {
   // Moves an issue to a column: the transition that leads to one of the column's statuses.
   // Shown there at once; the next refresh shows what Jira did.
   transition(key, to, cx) {
-    const issue = (this.issues ?? []).find((i) => i.key === key);
+    const id = this.source().account, acc = jiraAccount(id), st = this.st(id);
+    const issue = st.issues.find((i) => i.key === key);
     if (!issue || to.statuses.includes(String(issue.fields.status?.id))) return;
     cx.spawn(async (cx) => {
       try {
-        const creds = await credentials(), base = this.settings().base ?? this.settings().site;
+        const creds = await credentials(acc), base = acc?.base ?? acc?.site;
         if (!creds) throw new Error("not connected");
         const { transitions = [] } = await jira(base, creds.auth, `/rest/api/3/issue/${key}/transitions`);
         const tr = transitions.find((x) => to.statuses.includes(String(x.to?.id)));
@@ -382,11 +459,11 @@ export default class Jira extends View {
         await jira(base, creds.auth, `/rest/api/3/issue/${key}/transitions`, { transition: { id: tr.id } });
         issue.fields.status = tr.to;
         // Done-category statuses aren't in "my open issues": it leaves the list.
-        if (tr.to?.statusCategory?.key === "done") this.issues = this.issues.filter((i) => i !== issue);
-        this.groups = this.group(this.issues); this.count = this.issues.length; this.error = null;
-      } catch (e) { this.error = `Move ${key}: ${e.message ?? e}`; }
+        if (tr.to?.statusCategory?.key === "done") st.issues = st.issues.filter((i) => i !== issue);
+        st.groups = this.group(st.issues, st.columns); st.count = st.issues.length; st.error = null;
+      } catch (e) { st.error = `Move ${key}: ${e.message ?? e}`; }
       cx.notify();
-      this.refresh(cx);
+      this.refresh(cx, id);
     });
   }
 
@@ -400,9 +477,9 @@ export default class Jira extends View {
   formView(t) {
     const button = (id, label, primary, onClick) => div().id(id).h(28).px(12).flex().flex_1().items_center().justify_center().rounded(7).cursor_pointer().text_size(12)
       .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
-    const keepToken = this.savedEmail ? "API token (empty: keep the saved one)" : "API token";
+    const edit = this.jform?.mode === "edit", keepToken = edit ? "API token (empty: keep the saved one)" : "API token";
     return v_flex().p(8).gap(8).text_color(t.muted)
-      .child(div().text_color(t.foreground).font_semibold().child(this.setup ? "Connect Jira" : "Jira settings"))
+      .child(div().text_color(t.foreground).font_semibold().child(edit ? "Jira account" : "Add a Jira account"))
       .child(this.field("site", "Jira URL", this.site, t))
       .child(this.field("project", "Backlog project key (optional)", this.project, t))
       .child(this.field("email", "Atlassian email", this.email, t))
@@ -410,12 +487,12 @@ export default class Jira extends View {
       .child(h_flex().gap(6)
         .child(button("open-token-page", "Open token page", false, () => exec("open", [TOKEN_PAGE])))
         .child(button("save", this.saving ? "Checking…" : "Save", true, (_e, cx) => this.save(cx))))
-      .when(this.editing, (e) => e.child(button("cancel", "Cancel", false, (_e, cx) => { this.editing = false; cx.notify(); })))
+      .child(button("cancel", "Cancel", false, (_e, cx) => { this.jform = null; cx.notify(); }))
       .when(Boolean(this.formError), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(this.formError)))
       .child(div().text_size(10).text_color(t.dim).child("Checked against Jira before saving. The token goes to the macOS Keychain (herdr-jira); a token with scopes needs read:jira-work and read:jira-user."));
   }
 
-  url(key) { return `${this.settings().site}/browse/${key}`; }
+  url(key) { return `${jiraAccount(this.source().account)?.site}/browse/${key}`; }
 
   menuView(t) {
     const { key, x, y } = this.menu, w = 200;
@@ -468,7 +545,7 @@ export default class Jira extends View {
       .on_click((_e, cx) => {
         if (this.dragged) { this.dragged = false; return; }
         this.selected = issue.key; cx.notify();
-        openOverlay({ mod: "jira", kind: "dialog", width: 760, height: 0.85, props: { issue: issue.key } });
+        openOverlay({ mod: "jira", kind: "dialog", width: 760, height: 0.85, props: { issue: issue.key, account: this.source().account } });
       })
       // Press starts a possible drag (mine only: backlog issues aren't on my board's columns).
       .on_mouse_down("left", (e) => { if (section === "mine") { this.press = issue.key; this.pressAt = e.position; this.dragging = false; this.dragged = false; } })
@@ -484,19 +561,24 @@ export default class Jira extends View {
   }
 
   render(cx) {
-    const t = theme(), q = this.query, form = this.setup || this.editing;
+    const t = theme(), q = this.query;
     const match = (issue) => !q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q);
     if (this.detailKey) return this.detailView(t);
     if (this.cardPopup) return this.trello.cardView(t);
-    this.follow(cx);
-    const src = this.source(), tr = src.kind === "trello", T = this.trello;
-    const trForm = tr && (T.creds === null || this.trelloForm), trPick = tr && !trForm && (!src.board || this.picking);
+    // A space switch: follow it right after this frame (render itself mustn't notify).
+    const loc = location();
+    if (`${loc.on}|${loc.cwd}` !== this.loc && !this.followSoon) { this.followSoon = true; cx.spawn(async (cx) => { this.followSoon = false; this.follow(cx); }); }
+    const src = this.source(), tr = src.kind === "trello", jr = src.kind === "jira", T = this.trello;
+    const J = this.st(jr ? src.account : null), acc = jr ? jiraAccount(src.account) : tr ? trelloAccount(src.account) : null;
     const repoName = (this.repo ?? "").split("|").pop().split("/").pop() || "this project";
+    // What the body shows: a form, the account chooser, the board picker, or the tasks.
+    const mode = this.jform ? "jform" : this.trelloForm || (tr && T.creds === null) ? "tform"
+      : src.kind === "none" || this.choosing ? "choose" : tr && (!src.board || this.picking) ? "pick" : tr ? "trello" : "jira";
     // Every board column shows, empty ones too (somewhere to drop); a search hides the empty ones.
-    const groups = this.groups.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length || !q || this.dragging);
-    const backlog = this.backlog.filter(match), project = this.settings().project;
-    const empty = form ? null : this.error || (this.loading && !this.groups.length ? "Loading…"
-      : q && !groups.some((g) => g.issues.length) && !backlog.length ? "No matches" : !this.count ? "No open issues assigned to you" : null);
+    const groups = J.groups.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length || !q || this.dragging);
+    const backlog = J.backlog.filter(match), project = jr ? acc?.project : null;
+    const empty = J.error || (J.loading && !J.groups.length ? "Loading…"
+      : q && !groups.some((g) => g.issues.length) && !backlog.length ? "No matches" : !J.count && !J.loading ? "No open issues assigned to you" : null);
     const iconButton = (id, icon, tip, onClick, spin = false) => div().id(id).size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(tip).on_click((e, cx) => { cx.stop_propagation(); onClick(e, cx); }).child(svg(icon).size(14).when(spin, (s) => s.spin(900)));
     const sec = S.sectionOf("jira"), ov = S.overlay(sec);
@@ -510,7 +592,7 @@ export default class Jira extends View {
       .on_mouse_up("left", (_e, cx) => {
         if (this.dragging && this.press && this.over) {
           if (this.press.startsWith("t:")) { if (this.over.startsWith("tl:") && src.board) T.move(this.press.slice(2), this.over.slice(3), src.board.id, cx); }
-          else { const g = this.groups.find((x) => x.id === this.over); if (g) this.transition(this.press, g, cx); }
+          else { const g = J.groups.find((x) => x.id === this.over); if (g) this.transition(this.press, g, cx); }
         }
         if (this.press || this.dragging) { this.press = null; this.dragging = false; this.over = null; cx.notify(); }
       })
@@ -523,39 +605,42 @@ export default class Jira extends View {
       })
       .child(S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
         .child(S.mark(sec))
-        // Source of this project's tasks: Jira or Trello (per repo).
-        .child(h_flex().id("source").flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().text_size(11)
-          .children([["jira", "Jira"], ["trello", "Trello"]].map(([k, label]) => div().id(`src-${k}`).h(22).px(7).flex().items_center().cursor_pointer()
-            .bg(src.kind === k ? t.selected : t.background).text_color(src.kind === k ? t.foreground : t.muted).font_semibold()
-            .tooltip(this.repo ? `Tasks of ${repoName} come from ${label}` : "Open a project folder first")
-            .on_click((_e, cx) => { cx.stop_propagation(); if (src.kind !== k) this.setSource(k === "trello" ? { kind: "trello", board: null } : { kind: "jira" }, cx); })
-            .child(label))))
+        // This project's source and account; click: choose another (saved logins, a new one, none).
+        .child(h_flex().id("source").flex_none().max_w(190).h(24).px(7).gap(5).items_center().rounded(6).border_1().border_color(t.border).cursor_pointer()
+          .bg(mode === "choose" ? t.selected : t.background).hover((s) => s.bg(t.hover)).text_size(11)
+          .tooltip(this.repo ? `Where the tasks of ${repoName} come from` : "Open a project folder first")
+          .on_click((_e, cx) => { cx.stop_propagation(); this.choosing = !this.choosing; this.jform = null; this.trelloForm = false; cx.notify(); })
+          .child(svg(tr ? "mods/jira/trello.svg" : "mods/jira/jira.svg").size(13).text_color(src.kind === "none" ? t.dim : t.foreground))
+          .child(div().min_w(0).truncate().font_semibold().text_color(src.kind === "none" ? t.muted : t.foreground)
+            .child(jr ? acc.email.split("@")[0] : tr ? acc.name : "Connect…"))
+          .child(div().text_size(9).text_color(t.dim).child("▾")))
         .when(tr && Boolean(src.board), (e) => e.child(h_flex().id("board").flex_1().min_w(0).h(22).px(6).gap(4).items_center().rounded(5).cursor_pointer()
           .text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Change the board for this project")
           .on_click((_e, cx) => { cx.stop_propagation(); this.picking = !this.picking; if (this.picking) T.loadBoards(cx); cx.notify(); })
           .child(div().min_w(0).truncate().child(src.board.name)).child(div().text_size(9).child("▾"))))
         .when(!tr || !src.board, (e) => e.child(div().flex_1()))
         .child(div().flex_none().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted)
-          .child(tr ? `${src.board ? T.count(src.board.id) : 0}` : `${this.count} open`))
+          .child(tr ? `${src.board ? T.count(src.board.id) : 0}` : jr ? `${J.count} open` : "–"))
         .when(tr, (e) => e.child(h_flex().id("tr-scope").flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().text_size(10)
           .children([["all", "All", false], ["mine", "Mine", true]].map(([id, label, v]) => div().id(`tr-${id}`).h(20).px(6).flex().items_center().cursor_pointer()
             .bg(T.mine === v ? t.selected : t.background).text_color(T.mine === v ? t.foreground : t.muted)
             .on_click((_e, cx) => { cx.stop_propagation(); T.setMine(v, cx); }).child(label)))))
-        .when(tr ? T.creds !== null : !this.setup, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", tr ? "Trello connection" : "Settings",
-          (_e, cx) => { if (tr) { this.trelloForm = !this.trelloForm; cx.notify(); } else this.openSettings(cx); })))
+        .when(jr || tr, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", tr ? "This Trello account: a new key / token" : "This Jira account: project key, token",
+          (_e, cx) => { if (tr) { T.startAdd(); this.trelloForm = !this.trelloForm; this.jform = null; cx.notify(); } else if (this.jform) { this.jform = null; cx.notify(); } else this.openJiraForm("edit", cx); })))
         .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => tr ? (src.board && T.refresh(src.board.id, cx)) : this.refresh(cx),
-          tr ? Boolean(src.board && T.loading.has(src.board.id)) : this.loading)))
-      .when(tr ? !trForm && !trPick : !form, (e) => e.child(div().flex_none().px(8).pt(8)
+          tr ? Boolean(src.board && T.loading.has(src.board.id)) : J.loading)))
+      .when(mode === "jira" || mode === "trello", (e) => e.child(div().flex_none().px(8).pt(8)
         .child(div().id("search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("jira-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
-          .when(trForm, (e) => e.child(T.formView(t)))
-          .when(trPick, (e) => e.child(T.pickerView(t, repoName, (board, cx) => this.setSource({ kind: "trello", board }, cx))))
-          .when(tr && !trForm && !trPick, (e) => e.children(T.body(t, src.board.id, q)))
-          .when(!tr && form, (e) => e.child(this.formView(t)))
-          .when(!tr && Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
-          .when(!tr && !form, (e) => e
+          .when(mode === "jform", (e) => e.child(this.formView(t)))
+          .when(mode === "tform", (e) => e.child(T.formView(t)))
+          .when(mode === "choose", (e) => e.child(this.chooserView(t, repoName, src)))
+          .when(mode === "pick", (e) => e.child(T.pickerView(t, repoName, (board, cx) => this.setSource({ kind: "trello", account: src.account, board }, cx))))
+          .when(mode === "trello", (e) => e.children(T.body(t, src.board.id, q)))
+          .when(mode === "jira" && Boolean(empty), (e) => e.child(div().p(8).text_color(J.error ? t.ansi1 : t.dim).child(empty)))
+          .when(mode === "jira", (e) => e
             // Each column is a drop target while an issue is dragged.
             .children(groups.map((g) => v_flex().id(`col-${g.id}`).flex_none().rounded(6).gap(1).border_1()
               .border_color(this.dragging && this.over === g.id ? t.accent : this.dragging ? t.border : t.background)
