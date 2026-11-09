@@ -1,19 +1,29 @@
-*
-!.gitignore
-!README.md
-!programs.json
-!themes/
-!themes/**
-!fonts/
-!fonts/**
-!backgrounds/
-!backgrounds/**
-!layouts/
-!layouts/my-layout.*
-!mods/
-!mods/changes-copy/
-!mods/changes-copy/**
-mods/*/gpui-kit.d.ts
-mods/*/jsconfig.json
+# runtime / state
+herdr-app.sock
+data/
+telemetry/
+seen.json
+view.json
+window.json
+update-notes.json
+update-notes-media/
+installed.json
+
+# vendor files shipped with the app (restored/updated by Herdr itself)
+AGENTS.md
+gpui-kit.d.ts
+herdr.d.ts
+frame/
+icons/
 themes/atom-one-dark.json
 themes/win98.json
+mods/*/gpui-kit.d.ts
+mods/*/jsconfig.json
+
+# machine-local prefs (intentionally untracked)
+keys.json
+settings.json
+
+# private: project names/paths, company URLs (jira site), space ids
+remote-projects.json
+shared.json
