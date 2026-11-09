@@ -32,7 +32,7 @@ function changeMarks(lines) {
 
 // ponytail: one advance for every glyph (monospace, 11px code text at 0.6em); tabs and wide
 // (CJK, emoji) characters put the selection off by their extra width. Measure text if that matters.
-const CHAR_W = 11 * 0.6, ROW = 20;
+const CHAR_W = 11 * 0.6, ROW = 20, ITEM = 22, INDENT = 10; // ROW: code line, ITEM: changed-file list row, INDENT: per tree level
 const ahead = (p, q) => p.row < q.row || (p.row === q.row && p.col <= q.col);
 
 // Numbers each diff line once, so a frame only draws the rows on screen.
@@ -67,16 +67,18 @@ export default class Changes extends View {
     cx.timer.every(10000, (cx) => this.refresh(cx));
   }
 
-  watch(root, cx) {
+  watch(root, gitDir, cx) {
     if (this.on || this.watched === root) return;
     this.watched = root;
-    cx.spawn(async (cx) => {
+    // A worktree's index and HEAD live outside it (the main repo's .git/worktrees/<name>), so commits
+    // and staging there would only show on the 10 s timer: watch that folder too.
+    for (const dir of gitDir.startsWith(root + "/") ? [root] : [root, gitDir]) cx.spawn(async (cx) => {
       try {
         while (this.watched === root) {
-          await watchFolder(root);
+          await watchFolder(dir);
           if (this.watched === root) this.refresh(cx);
         }
-      } catch { this.watched = null; }
+      } catch { if (dir === root) this.watched = null; }
     });
   }
 
@@ -92,10 +94,10 @@ export default class Changes extends View {
     const scope = this.scope, stale = () => key() !== context || this.scope !== scope;
     cx.spawn(async (cx) => {
       try {
-        const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
+        const top = await exec("git", ["rev-parse", "--show-toplevel", "--absolute-git-dir"], { cwd, on });
         if (stale()) return;
         if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a git repository"; return; }
-        const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+        const [root, gitDir] = top.stdout.trim().split("\n"), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (status.code !== 0) throw new Error(status.stderr);
         const head = await git(["rev-parse", "--verify", "HEAD"]);
@@ -139,7 +141,7 @@ export default class Changes extends View {
         }
         if (stale()) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
-        this.watch(root, cx);
+        this.watch(root, gitDir, cx);
         if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
         // The first file's diff shows until you pick another.
         if (!this.open && !this.closed && files.length) this.open = files[0].path;
@@ -258,7 +260,7 @@ export default class Changes extends View {
   }
 
   dirRow(r, t) {
-    return h_flex().id(`dir-${r.path}`).h(28).flex_none().pl(8 + r.depth * 14).pr(8).gap(6).items_center().rounded(7).cursor_pointer()
+    return h_flex().id(`dir-${r.path}`).h(ITEM).flex_none().pl(8 + r.depth * INDENT).pr(8).gap(6).items_center().rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleDir(r.path, cx))
       .child(div().w(12).text_size(10).text_color(t.muted).child(r.open ? "▾" : "▸"))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.label))
@@ -452,12 +454,12 @@ export default class Changes extends View {
         .child(this.segment("mode", this.mode, [["diff", "diff", "Diff"], ["file", "file", "Full file"]], (v, cx) => this.setMode(v, cx), t))
         .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
-      .child(div().flex_1().min_h(44).max_h(rows.length * 28 + 12).relative().border_b(1).border_color(t.border)
+      .child(div().flex_1().min_h(44).max_h(rows.length * ITEM + 12).relative().border_b(1).border_color(t.border)
         .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().p(6).children(rows.map((r) => {
         if (r.dir) return this.dirRow(r, t);
         const f = r.file, parts = tree ? [] : f.path.split("/"), name = tree ? r.name : parts.pop();
-        return h_flex().id(`change-${f.path}`).h(28).flex_none().px(8).pl(tree ? 8 + r.depth * 14 + 18 : 8).gap(8).items_center().rounded(7).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
-          .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
+        return h_flex().id(`change-${f.path}`).h(ITEM).flex_none().px(8).pl(tree ? 8 + r.depth * INDENT + 18 : 8).gap(4).items_center().rounded(5).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
+          .child(div().w(10).flex_none().text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? (this.base ? `No changes since ${this.base}` : "No uncommitted changes") : "No folder")))))
