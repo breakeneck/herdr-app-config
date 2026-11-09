@@ -15,6 +15,7 @@ gpui-kit.d.ts
 herdr.d.ts
 frame/
 /icons/
+mods/win98/icons/
 themes/atom-one-dark.json
 themes/win98.json
 mods/*/gpui-kit.d.ts
