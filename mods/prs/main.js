@@ -4,7 +4,7 @@ import { spaces, panes, focused, exec, theme, notify, playSound } from "herdr";
 import * as S from "./section.js";
 
 // My open pull requests in the repo of the focused folder. Click opens it in the browser.
-// GitHub: via the `gh` CLI. GitLab (any other host, e.g. a self-hosted git.allmylinks.com): merge requests
+// GitHub: via the `gh` CLI. GitLab (any other host, e.g. a self-hosted git.example.com): merge requests
 // via its REST API, with a personal access token (read_api) kept in the macOS Keychain
 // (service herdr-gitlab, account = the host); the panel asks for it the first time.
 // ponytail: only open PRs I authored (first 100); add `--search "review-requested:@me"` as a second list if wanted.
