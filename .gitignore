@@ -1,8 +1,6 @@
 *
 !.gitignore
 !README.md
-!keys.json
-!settings.json
 !programs.json
 !themes/
 !themes/**
