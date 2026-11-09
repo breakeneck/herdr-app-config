@@ -1,7 +1,8 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-base";
-import { exec, theme, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
+import { exec, theme, shared, setShared, props, openOverlay, closeOverlay, spaces, panes, focused } from "herdr";
 import * as S from "./section.js";
+import { Trello } from "./trello.js";
 import { Buffer } from "buffer";
 
 // My open Jira issues grouped by their board's columns ("folders": To Do, In Progress, ...), in the
@@ -114,14 +115,40 @@ function adf(node, depth = 0) {
     default: return kids(node);
   }
 }
+// The Tasks panel follows the focused project: its source is Jira (the default) or a Trello board,
+// chosen per repo and kept in shared "tasks.sources" = { repoKey: { kind: "jira" | "trello", board?: { id, name } } }.
+function location() {
+  const space = spaces().find((s) => s.active), f = focused();
+  const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
+  const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
+  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+}
+// A repo's key from its origin remote (host|path, so every checkout of it shares the choice).
+function remoteKey(url) {
+  const m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(url) ?? /^(?:[^@]+@)?([^:/]+):(.+?)(?:\.git)?\/?$/.exec(url);
+  return m ? `${m[1].toLowerCase()}|${m[2]}` : null;
+}
+const STALE = 30000; // a cached list shows at once; a switch refreshes it when older than this
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
 
 export default class Jira extends View {
   init(_props, cx) {
     // Opened as a popup for one issue (click on a row): show it whole, nothing else.
     if (props()?.issue) { this.detailKey = props().issue; this.loadDetail(cx); return; }
+    if (props()?.trelloCard) { this.trello = new Trello(this); this.cardPopup = true; this.trello.loadCard(props().trelloCard, cx); return; }
     this.groups = []; this.backlog = []; this.count = 0; this.error = null; this.loading = false;
     this.columns = {}; // project key -> board columns (asked once per session)
+    this.trello = new Trello(this);
+    this.remotes = new Map(store.get("remotes", [])); // `${on}|${cwd}` -> repo key
+    this.loc = null; this.repo = null; this.picking = false; this.trelloForm = false;
+    // Hot start: the last Jira list (and its board columns) from the cache, refreshed in the background.
+    const c = store.get("jira:cache", null);
+    if (c) { this.columns = c.columns ?? {}; this.issues = c.issues ?? []; this.groups = this.group(this.issues); this.backlog = c.backlog ?? []; this.count = this.issues.length; this.at = c.at; }
     this.press = null; this.dragging = false; // a pressed issue row, and whether it's being dragged
     this.setup = false; this.editing = false; this.saving = false; this.formError = null; this.savedEmail = null; this.query = "";
     const input = (placeholder) => { const s = InputState.new({ placeholder }); s.on("submit", (_e, cx) => this.save(cx)); return s; };
@@ -132,9 +159,49 @@ export default class Jira extends View {
     this.token.set_masked(true);
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
+    this.follow(cx);
     this.refresh(cx);
-    cx.timer.every(5 * 60 * 1000, (cx) => this.refresh(cx));
+    cx.timer.every(2000, (cx) => this.follow(cx)); // a `cd` in a terminal; render catches space switches
+    cx.timer.every(2 * 60 * 1000, (cx) => { const src = this.source(); if (src.kind === "trello") { if (src.board) this.trello.refresh(src.board.id, cx); } else this.refresh(cx); });
   }
+
+  source() { return (this.repo && (shared("tasks.sources") ?? {})[this.repo]) || { kind: "jira" }; }
+  setSource(next, cx) {
+    if (!this.repo) return;
+    setShared("tasks.sources", { ...(shared("tasks.sources") ?? {}), [this.repo]: next });
+    this.picking = false; this.activate(cx);
+  }
+
+  // The focused place moved: find its repo (cached), then show its source at once.
+  follow(cx) {
+    const loc = location(), lk = `${loc.on}|${loc.cwd}`;
+    if (lk === this.loc) return;
+    this.loc = lk;
+    if (this.remotes.has(lk)) { this.repo = this.remotes.get(lk); this.activate(cx); return; }
+    if (!loc.cwd) { this.repo = null; this.activate(cx); return; }
+    cx.spawn(async (cx) => {
+      const r = await exec("git", ["remote", "get-url", "origin"], { cwd: loc.cwd, on: loc.on }).catch(() => null);
+      const repo = (r?.code === 0 && remoteKey(r.stdout.trim())) || lk;
+      this.remotes.set(lk, repo); store.set("remotes", [...this.remotes]);
+      if (this.loc === lk) { this.repo = repo; this.activate(cx); }
+    });
+  }
+
+  activate(cx) {
+    const src = this.source();
+    if (src.kind === "trello") {
+      this.trello.ready().then(() => cx.notify());
+      if (src.board) this.trello.show(src.board.id, cx);
+      else if (!this.trello.boards) this.trello.loadBoards(cx);
+    } else if (!this.loading && Date.now() - (this.at ?? 0) > STALE) this.refresh(cx);
+    cx.notify();
+  }
+
+  overTarget(id, hovered, cx) {
+    if (hovered) { if (this.over !== id) { this.over = id; if (this.dragging) cx.notify(); } }
+    else if (this.over === id) { this.over = null; if (this.dragging) cx.notify(); }
+  }
+  openTrelloCard(id) { openOverlay({ mod: "jira", kind: "dialog", width: 760, height: 0.85, props: { trelloCard: id } }); }
 
   settings() { return shared(SETTINGS) ?? {}; }
 
@@ -176,7 +243,8 @@ export default class Jira extends View {
           if (!(key in this.columns)) this.columns[key] = await boardColumns(base, creds.auth, key).catch(() => null);
         }
         this.issues = issues; this.groups = this.group(issues);
-        this.backlog = backlog; this.count = issues.length; this.error = null;
+        this.backlog = backlog; this.count = issues.length; this.error = null; this.at = Date.now();
+        store.set("jira:cache", { issues, columns: this.columns, backlog, at: this.at });
       } catch (e) {
         // A revoked or expired token: back to the form.
         if (e.status === 401) {
@@ -406,6 +474,11 @@ export default class Jira extends View {
     const t = theme(), q = this.query, form = this.setup || this.editing;
     const match = (issue) => !q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q);
     if (this.detailKey) return this.detailView(t);
+    if (this.cardPopup) return this.trello.cardView(t);
+    this.follow(cx);
+    const src = this.source(), tr = src.kind === "trello", T = this.trello;
+    const trForm = tr && (T.creds === null || this.trelloForm), trPick = tr && !trForm && (!src.board || this.picking);
+    const repoName = (this.repo ?? "").split("|").pop().split("/").pop() || "this project";
     // Every board column shows, empty ones too (somewhere to drop); a search hides the empty ones.
     const groups = this.groups.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length || !q || this.dragging);
     const backlog = this.backlog.filter(match), project = this.settings().project;
@@ -422,7 +495,10 @@ export default class Jira extends View {
       .on_mouse_move((e, cx) => this.maybeStartDrag(e, cx))
       // The release: drop on the column under the pointer (tracked by hover), then end the drag.
       .on_mouse_up("left", (_e, cx) => {
-        if (this.dragging && this.press && this.over) { const g = this.groups.find((x) => x.id === this.over); if (g) this.transition(this.press, g, cx); }
+        if (this.dragging && this.press && this.over) {
+          if (this.press.startsWith("t:")) { if (this.over.startsWith("tl:") && src.board) T.move(this.press.slice(2), this.over.slice(3), src.board.id, cx); }
+          else { const g = this.groups.find((x) => x.id === this.over); if (g) this.transition(this.press, g, cx); }
+        }
         if (this.press || this.dragging) { this.press = null; this.dragging = false; this.over = null; cx.notify(); }
       })
       .on_hover((h, cx) => { if (!h && this.press) { this.press = null; this.dragging = false; cx.notify(); } })
@@ -434,19 +510,39 @@ export default class Jira extends View {
       })
       .child(S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
         .child(S.mark(sec))
-        .child(div().font_semibold().text_size(13).child("Jira"))
-        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.count} open`))
-        .child(div().flex_1())
-        .when(!this.setup, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", "Settings", (_e, cx) => this.openSettings(cx))))
-        .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => this.refresh(cx), this.loading)))
-      .when(!form, (e) => e.child(div().flex_none().px(8).pt(8)
+        // Source of this project's tasks: Jira or Trello (per repo).
+        .child(h_flex().id("source").flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().text_size(11)
+          .children([["jira", "Jira"], ["trello", "Trello"]].map(([k, label]) => div().id(`src-${k}`).h(22).px(7).flex().items_center().cursor_pointer()
+            .bg(src.kind === k ? t.selected : t.background).text_color(src.kind === k ? t.foreground : t.muted).font_semibold()
+            .tooltip(this.repo ? `Tasks of ${repoName} come from ${label}` : "Open a project folder first")
+            .on_click((_e, cx) => { cx.stop_propagation(); if (src.kind !== k) this.setSource(k === "trello" ? { kind: "trello", board: null } : { kind: "jira" }, cx); })
+            .child(label))))
+        .when(tr && Boolean(src.board), (e) => e.child(h_flex().id("board").flex_1().min_w(0).h(22).px(6).gap(4).items_center().rounded(5).cursor_pointer()
+          .text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Change the board for this project")
+          .on_click((_e, cx) => { cx.stop_propagation(); this.picking = !this.picking; if (this.picking) T.loadBoards(cx); cx.notify(); })
+          .child(div().min_w(0).truncate().child(src.board.name)).child(div().text_size(9).child("▾"))))
+        .when(!tr || !src.board, (e) => e.child(div().flex_1()))
+        .child(div().flex_none().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted)
+          .child(tr ? `${src.board ? T.count(src.board.id) : 0}` : `${this.count} open`))
+        .when(tr, (e) => e.child(h_flex().id("tr-scope").flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().text_size(10)
+          .children([["all", "All", false], ["mine", "Mine", true]].map(([id, label, v]) => div().id(`tr-${id}`).h(20).px(6).flex().items_center().cursor_pointer()
+            .bg(T.mine === v ? t.selected : t.background).text_color(T.mine === v ? t.foreground : t.muted)
+            .on_click((_e, cx) => { cx.stop_propagation(); T.setMine(v, cx); }).child(label)))))
+        .when(tr ? T.creds !== null : !this.setup, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", tr ? "Trello connection" : "Settings",
+          (_e, cx) => { if (tr) { this.trelloForm = !this.trelloForm; cx.notify(); } else this.openSettings(cx); })))
+        .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => tr ? (src.board && T.refresh(src.board.id, cx)) : this.refresh(cx),
+          tr ? Boolean(src.board && T.loading.has(src.board.id)) : this.loading)))
+      .when(tr ? !trForm && !trPick : !form, (e) => e.child(div().flex_none().px(8).pt(8)
         .child(div().id("search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("jira-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
-          .when(form, (e) => e.child(this.formView(t)))
-          .when(Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
-          .when(!form, (e) => e
+          .when(trForm, (e) => e.child(T.formView(t)))
+          .when(trPick, (e) => e.child(T.pickerView(t, repoName, (board, cx) => this.setSource({ kind: "trello", board }, cx))))
+          .when(tr && !trForm && !trPick, (e) => e.children(T.body(t, src.board.id, q)))
+          .when(!tr && form, (e) => e.child(this.formView(t)))
+          .when(!tr && Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
+          .when(!tr && !form, (e) => e
             // Each column is a drop target while an issue is dragged.
             .children(groups.map((g) => v_flex().id(`col-${g.id}`).flex_none().rounded(6).gap(1).border_1()
               .border_color(this.dragging && this.over === g.id ? t.accent : this.dragging ? t.border : t.background)
