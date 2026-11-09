@@ -28,3 +28,5 @@ settings.json
 # private: project names/paths, company URLs (jira site), space ids
 remote-projects.json
 shared.json
+# Herdr click state per layout (sizes, shown/hidden): personal
+layouts/.state/
