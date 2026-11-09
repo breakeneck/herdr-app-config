@@ -1,7 +1,7 @@
 // Sections: any sidebar/panel block whose mod uses this file can be collapsed by clicking
 // its title, and moved anywhere while "Edit layout" (the header button) is on.
-// SAME FILE in spaces-copy, agents-copy, files-copy, changes-copy, remote-projects:
-// edit mods/spaces-copy/section.js and copy it over the others.
+// SAME FILE in every mod that uses sections. The canonical copy is mods/wb-spaces/section.js:
+// edit it there, then run `scripts/sync-helpers.sh --write` to copy it over the others.
 //
 // Shared state: "layout.edit" (bool), "layout.drag" ({ id } of the picked block),
 // "sections.collapsed" ({ id: { size, min } } — what to restore on expand).
