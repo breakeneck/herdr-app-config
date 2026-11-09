@@ -89,6 +89,18 @@ herdr.dev (див. розділ «Layouts and mods other people made» в `AGENT
 7. **Клони вбудованих модів** (`*-copy`) не оновлюються з Herdr. Їхні `mod.json` мають
    `cloned_from`, і це треба згадати в `RECIPE.md`.
 
+### Різниця за аудитом (крок 1, 9 листопада 2026)
+
+- Пункти 1, 3, 5, 6 збігаються. `commit-settings` і `changes-copy/highlight.js` ніде не
+  використовуються (`diff-view/highlight.js` використовується — лишається).
+- Пункт 2: ще `spaces-copy` → вбудований `menu`.
+- Пункт 4: скрипт бачить тільки літерали; `ai.models`, `ai.use` (у всіх `ai.js`),
+  `ai.reviewDrafts` (`prs`), `tasks.accounts` (`jira`, `trello.js`) — через константи.
+  `sidebar.width`, `agents.sort`, `sidebar.collapsed` у `agents-copy` — ключі самого Herdr
+  (їх читають вбудовані `agents` і `workspace-chrome`): **не перейменовувати**.
+  `space.colors` теж ключ Herdr (вбудовані `spaces`, `picker`) — **не перейменовувати**.
+  `tasks.sources` у вбудованих не знайдено — перейменовується.
+
 ## Цільова структура
 
 - **Префікс `wb-`** (workbench) для всіх наших модів. Перейменування:
@@ -179,7 +191,15 @@ herdr.dev (див. розділ «Layouts and mods other people made» в `AGENT
 - `git grep -i` за назвами компаній, хостами й email нічого не знаходить.
 - Кожен пакет має `RECIPE.md` і `preview.png`, а README описує мережу, програми й токени.
 
-## Відкриті питання (до людини)
+## Рішення (9 листопада 2026)
+
+- Токени: v1 тільки macOS (Keychain); деінде панель пояснює, що поки не підтримується.
+- Клони вбудованих (`wb-spaces`, `wb-agents`, `wb-files`, `wb-tabs`, `wb-changes`) — у пакеті.
+- Назва: `workbench`, префікс модів `wb-`, ключі `wb.*`.
+- `wb-tasks` і `wb-prs` походять із github.com/gandriyko/herdr-app-config — згадати в README і
+  обох `RECIPE.md` (перевірити ліцензію того репо).
+
+## Відкриті питання (до людини) — закриті, див. «Рішення»
 
 - Токени поза macOS: v1 тільки macOS, чи файл із попередженням?
 - Чи класти клони вбудованих модів (`wb-spaces`, `wb-agents`, `wb-files`, `wb-tabs`,
