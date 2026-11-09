@@ -2,6 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
+import { modelFor, runModel, describe } from "./ai.js";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -19,7 +20,7 @@ const ITEM = 22, INDENT = 10; // ITEM: changed-file list row, INDENT: per tree l
 const DEFAULT_TEMPLATE = "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it. No blank lines anywhere.";
 const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
 // Generation settings live in shared("commit.gen"), edited in the commit-gen window.
-const openGenSettings = () => openOverlay({ mod: "commit-gen", kind: "window", key: "commit-gen", width: 460 });
+const openGenSettings = () => openOverlay({ mod: "commit-gen", kind: "window", key: "commit-gen", width: 580 });
 
 export default class Changes extends View {
   init(_props, cx) {
@@ -220,13 +221,14 @@ export default class Changes extends View {
     else run("tab.new", { name: path.split("/").pop(), mod: "diff-view", props: req, space: space?.id ?? undefined });
   }
 
-  genConfig() { return { provider: "claude", command: "claude", args: "-p", model: "", url: "http://localhost:11434/v1", ...(shared("commit.gen") ?? {}) }; }
+  // The commit template ({ template, noBlank }); the model is the one picked for commits (ai.js).
+  genConfig() { return { template: "", noBlank: true, ...(shared("commit.gen") ?? {}) }; }
   // Ask the configured model for a commit message from the current diff, and drop it into the textarea.
   // Claude rides the person's subscription and starts inside the repo folder; local goes to the endpoint.
   generate(cx) {
     if (!this.root || this.generating || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, hasHead = this.hasHead, against = this.against;
-    const cfg = this.genConfig();
+    const cfg = this.genConfig(), model = modelFor("commit");
     this.generating = true; this.note = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -240,22 +242,7 @@ export default class Changes extends View {
         if (fresh.length) text += `\n\nNew untracked files (contents not shown): ${fresh.join(", ")}`;
         // The template (commit-gen window) says how the message looks; blank lines are dropped unless allowed.
         const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template || DEFAULT_TEMPLATE} Reply with the message only — no quotes, no code fences, no explanations.`;
-        let msg;
-        if (cfg.provider === "local") {
-          const url = String(cfg.url || "").replace(/\/+$/, "");
-          if (!url) throw new Error("set the local server URL in Settings first");
-          if (!cfg.model) throw new Error("pick a model in Settings first");
-          const r = await fetch(`${url}/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: cfg.model, messages: [{ role: "user", content: `${prompt}\n\n${text}` }], stream: false }) });
-          if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
-          const j = await r.json();
-          msg = String(j.choices?.[0]?.message?.content ?? "").trim();
-        } else {
-          const args = [...String(cfg.args || "").split(/\s+/).filter(Boolean), ...(cfg.model ? ["--model", cfg.model] : []), `${prompt}\n\n${text}`];
-          const r = await exec(cfg.command || "claude", args, { cwd: root, on, timeout: 180000 });
-          if (r.code !== 0) throw new Error((r.stderr || r.stdout || "no output").trim().slice(0, 300));
-          msg = r.stdout.trim();
-        }
-        msg = msg.replace(/^```[^\n]*\n/, "").replace(/\n?```$/, "").trim();
+        let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on });
         if (cfg.noBlank !== false) msg = msg.split("\n").filter((l) => l.trim()).join("\n");
         if (!msg) throw new Error("the model returned nothing");
         if (key() === context) { this.input.set_value(msg); this.message = msg; }
@@ -273,7 +260,7 @@ export default class Changes extends View {
       .on_click(() => { closeOverlay(props()?.overlay); action(); })
       .child(svg("mods/workspace-chrome/settings.svg").size(13).text_color(t.muted)).child(label);
     return v_flex().p(6).gap(2).w_full().bg(t.raised).text_color(t.foreground)
-      .child(item("gen-settings", "Settings…", openGenSettings));
+      .child(item("gen-settings", "AI models…", openGenSettings));
   }
 
   commit(cx) {
@@ -354,7 +341,7 @@ export default class Changes extends View {
         .child(div().id("commit-message").w_full().h(this.commitH).flex_none().overflow_hidden().px(10).py(6).rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.input).w_full().h(this.commitH - 14).text_size(12).text_color(t.foreground)))
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
-            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Ask ${this.genConfig().command || "claude"} to write the commit message from the diff`)
+            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit")?.name ?? "no model"} (${describe(modelFor("commit"))})`)
               .child(this.generating ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/workspace-chrome/layers.svg").size(12))
               .child(this.generating ? "Generating…" : "Generate"))
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 180, props: { menu: true } })).child(svg("mods/workspace-chrome/chevron-down.svg").size(12))))

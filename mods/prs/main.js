@@ -1,7 +1,16 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
+import { models, modelFor, setUse, runModel, describe } from "./ai.js";
+
+// AI review drafts, per PR/MR url, until posted or discarded: shared "ai.reviewDrafts" = { url: { text, model, at } }.
+const DRAFTS = "ai.reviewDrafts";
+const openAiModels = () => openOverlay({ mod: "commit-gen", kind: "window", key: "commit-gen", width: 580 });
+const REVIEW_PROMPT = "You are reviewing a pull request. Write a concise code review in GitHub-flavored markdown: "
+  + "a short summary of what it changes, then the concrete problems you find (bugs, risks, missing tests, unclear code) as a list, "
+  + "each with a file:line reference and why it matters, then optional suggestions. Skip praise and nitpicks; if nothing is wrong, say so briefly. "
+  + "Reply with the review only.";
 
 // My open pull requests in the repo of the focused folder. Click opens it in the browser.
 // GitHub: via the `gh` CLI. GitLab (any other host, e.g. a self-hosted git.example.com): merge requests
@@ -51,8 +60,9 @@ async function gitlabToken(host) {
   const r = await exec("security", ["find-generic-password", "-s", GL_SERVICE, "-a", host, "-w"]).catch(() => null);
   return r?.code === 0 ? r.stdout.trim() || null : null;
 }
-async function gitlab(host, token, path, method = "GET") {
-  const r = await fetch(`https://${host}/api/v4${path}`, { method, headers: { "PRIVATE-TOKEN": token, Accept: "application/json" } });
+async function gitlab(host, token, path, method = "GET", body) {
+  const r = await fetch(`https://${host}/api/v4${path}`, { method, body: body ? JSON.stringify(body) : undefined,
+    headers: { "PRIVATE-TOKEN": token, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) } });
   if (!r.ok) throw Object.assign(new Error(`GitLab ${r.status}: ${(await r.text()).slice(0, 160)}`), { status: r.status });
   return r.json();
 }
@@ -91,7 +101,15 @@ const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle:
 export default class Prs extends View {
   init(_props, cx) {
     // Opened as a popup for one PR/MR (click on a row): its description, comments and approvals.
-    if (props()?.pr) { this.detailPr = props().pr; this.loadDetail(cx); return; }
+    if (props()?.pr) {
+      this.detailPr = props().pr; this.reviewing = false; this.aiMenu = false; this.posting = false;
+      // The review draft: editable, kept (shared) until posted or discarded.
+      this.draft = TextareaState.new({ placeholder: "AI review draft", rows: 12 });
+      const saved = (shared(DRAFTS) ?? {})[this.detailPr.url];
+      if (saved) this.draft.set_value(saved.text);
+      this.draft.on("blur", () => this.keepDraft());
+      this.loadDetail(cx); return;
+    }
     this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = ""; this.started = Date.now();
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
@@ -212,6 +230,72 @@ export default class Prs extends View {
     });
   }
 
+  // ── AI review ──
+  draftInfo() { return (shared(DRAFTS) ?? {})[this.detailPr.url] ?? null; }
+  keepDraft(meta) {
+    const all = { ...(shared(DRAFTS) ?? {}) }, old = all[this.detailPr.url];
+    all[this.detailPr.url] = { ...(old ?? {}), ...(meta ?? {}), text: this.draft.value() };
+    setShared(DRAFTS, all);
+  }
+  dropDraft() {
+    const all = { ...(shared(DRAFTS) ?? {}) };
+    delete all[this.detailPr.url];
+    setShared(DRAFTS, all); this.draft.set_value("");
+  }
+
+  // The PR/MR as one unified diff (capped: a model's prompt has room for so much).
+  async diffText() {
+    const pr = this.detailPr, r = pr.repo;
+    if (pr.provider === "gitlab") {
+      const token = await gitlabToken(r.host), base = `/projects/${encodeURIComponent(r.path)}/merge_requests/${pr.number}`;
+      const files = await gitlab(r.host, token, `${base}/diffs?per_page=100`).catch(async () => (await gitlab(r.host, token, `${base}/changes`)).changes ?? []);
+      return files.map((f) => `diff --git a/${f.old_path} b/${f.new_path}\n--- a/${f.old_path}\n+++ b/${f.new_path}\n${f.diff}`).join("\n");
+    }
+    const x = await exec("gh", ["pr", "diff", String(pr.number)], { cwd: r.cwd, on: r.on });
+    if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim());
+    return x.stdout;
+  }
+
+  aiReview(cx) {
+    if (this.reviewing || !this.detail) return;
+    const pr = this.detailPr, d = this.detail, model = modelFor("review");
+    this.reviewing = true; this.reviewError = null; this.aiMenu = false; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const diff = await this.diffText();
+        const prompt = `${REVIEW_PROMPT}\n\nTitle: ${d.title}\n\nDescription:\n${(d.body || "(none)").slice(0, 8000)}\n\nDiff (${d.from} → ${d.to}):\n${diff.slice(0, 90000)}${diff.length > 90000 ? "\n… (diff truncated)" : ""}`;
+        // A CLI model runs inside the repo on its machine, so it can open more of the code than the diff.
+        const text = await runModel(model, prompt, { cwd: pr.repo.cwd, on: pr.repo.on });
+        if (!text) throw new Error("the model returned nothing");
+        this.draft.set_value(text);
+        this.keepDraft({ model: model?.name, at: new Date().toISOString() });
+      } catch (e) { this.reviewError = `AI review failed: ${e.message ?? e}`; }
+      finally { this.reviewing = false; cx.notify(); }
+    });
+  }
+
+  // The draft, as it is now (edited or not), becomes a comment on the PR/MR.
+  postDraft(cx) {
+    const pr = this.detailPr, r = pr.repo, body = this.draft.value().trim();
+    if (!body || this.posting) return;
+    this.posting = true; this.reviewError = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        if (pr.provider === "gitlab") {
+          const token = await gitlabToken(r.host);
+          await gitlab(r.host, token, `/projects/${encodeURIComponent(r.path)}/merge_requests/${pr.number}/notes`, "POST", { body });
+        } else {
+          const x = await exec("gh", ["pr", "comment", String(pr.number), "--body", body], { cwd: r.cwd, on: r.on });
+          if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim());
+        }
+        this.dropDraft();
+        notify({ title: "Review posted", body: `${pr.provider === "gitlab" ? "!" : "#"}${pr.number} ${pr.title}`, level: "success" });
+        this.loadDetail(cx);
+      } catch (e) { this.reviewError = `Post failed: ${e.status === 403 ? "the token can't comment (needs the api scope)" : e.message ?? e}`; }
+      finally { this.posting = false; cx.notify(); }
+    });
+  }
+
   // ── the PR/MR popup ──
   loadDetail(cx) {
     const pr = this.detailPr, r = pr.repo;
@@ -246,11 +330,31 @@ export default class Prs extends View {
     const meta = (label, value) => !value ? null : h_flex().gap(8).items_center().text_size(12)
       .child(div().w(80).flex_none().text_color(t.dim).child(label)).child(div().flex_1().min_w(0).truncate().child(value));
     const canApprove = d && (gl || !d.mineApproved);
-    return v_flex().id("pr-detail").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+    const menu = !this.aiMenu ? null : v_flex().id("ai-menu-list").absolute().top(40).right(16).w(280).p(4).gap(1).rounded(8)
+      .border_1().border_color(t.border).bg(t.popover).shadow_lg().on_mouse_down_out((_e, cx) => { this.aiMenu = false; cx.notify(); })
+      .child(div().px(8).py(4).text_size(10).font_semibold().text_color(t.dim).child("REVIEW WITH"))
+      .children(models().map((m) => h_flex().id(`rv-${m.id}`).h(26).px(8).gap(6).items_center().rounded(5).cursor_pointer()
+        .when(modelFor("review")?.id === m.id, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { setUse("review", m.id); this.aiMenu = false; cx.notify(); })
+        .child(div().flex_1().truncate().text_size(12).child(m.name)).child(div().text_size(11).text_color(t.dim).child(describe(m)))))
+      .child(div().h(1).my(2).bg(t.border))
+      .child(h_flex().id("rv-settings").h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.aiMenu = false; openAiModels(); cx.notify(); }).child("AI models…"));
+    return v_flex().id("pr-detail").size_full().min_h(0).relative().bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().h(44).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().text_size(12).text_color(t.dim).child(num))
         .when(Boolean(d?.approvedBy?.length), (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(t.done).text_size(11).text_color(t.done).child(`✓ approved · ${d.approvedBy.length}`)))
         .child(div().flex_1())
+        // AI review, and ▾: which model reviews (shared list) and the AI models window.
+        .child(h_flex().id("ai-review").h(26).flex_none().rounded(6).border_1().border_color(t.accent).overflow_hidden()
+          .child(h_flex().id("ai-run").h_full().px(10).gap(6).items_center().text_size(12).text_color(t.accent).cursor_pointer()
+            .hover((s) => s.bg(t.hover)).tooltip(`Review with ${modelFor("review")?.name ?? "no model"} (${describe(modelFor("review"))})`)
+            .on_click((_e, cx) => this.aiReview(cx))
+            .child(this.reviewing ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.accent).spin(900) : div().child("✦"))
+            .child(this.reviewing ? "Reviewing…" : "AI review"))
+          .child(div().id("ai-menu").w(22).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted)
+            .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.aiMenu = !this.aiMenu; cx.notify(); })
+            .child(svg("mods/workspace-chrome/chevron-down.svg").size(11))))
         .when(Boolean(canApprove), (e) => e.child(btn("approve", d.mineApproved ? "Remove approval" : "Approve", (_e, cx) => this.setApproval(pr, !d.mineApproved, cx), !d.mineApproved)))
         .child(btn("open", "Open", () => exec("open", [pr.url])))
         .child(btn("copy", "Copy link", (_e, cx) => cx.write_to_clipboard(pr.url)))
@@ -264,13 +368,26 @@ export default class Prs extends View {
             meta("Approved by", d.approvedBy.length ? d.approvedBy.join(", ") : "nobody yet")].filter(Boolean)))
           .child(div().h(1).bg(t.border))
           .child(d.body.trim() ? TextView.markdown(`pr-desc-${pr.number}`, d.body) : div().text_color(t.dim).child("No description"))
+          .when(Boolean(this.reviewError), (e) => e.child(div().text_size(12).text_color(t.ansi1).child(this.reviewError)))
+          // The AI review as a draft: edit it, then post it as a comment (or regenerate / discard).
+          .when(Boolean(this.draftInfo()) || this.reviewing, (e) => e.child(v_flex().gap(8).p(10).rounded(8).border_1().border_color(t.accent).bg(t.raised)
+            .child(h_flex().gap(8).items_center().text_size(11)
+              .child(div().font_semibold().text_color(t.accent).child("AI REVIEW · DRAFT"))
+              .child(div().text_color(t.dim).child(this.reviewing ? `${modelFor("review")?.name ?? ""} is reviewing…` : [this.draftInfo()?.model, when(this.draftInfo()?.at)].filter(Boolean).join(" · ")))
+              .child(div().flex_1())
+              .child(btn("draft-discard", "Discard", (_e, cx) => { this.dropDraft(); cx.notify(); }))
+              .child(btn("draft-again", "Regenerate", (_e, cx) => this.aiReview(cx)))
+              .child(btn("draft-post", this.posting ? "Posting…" : "Post as comment", (_e, cx) => this.postDraft(cx), true)))
+            .child(div().id("draft-box").h(260).px(10).py(8).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
+              .child(Textarea.new(this.draft).w_full().h(244).text_size(12).text_color(t.foreground)))))
           .when(d.comments.length > 0, (e) => e
             .child(div().h(1).bg(t.border))
             .child(div().text_size(11).font_semibold().text_color(t.dim).child(`COMMENTS · ${d.comments.length}`))
             .children(d.comments.map((c) => v_flex().gap(4).p(10).rounded(8).bg(t.raised)
               .child(h_flex().gap(8).text_size(11).child(div().font_semibold().child(c.author ?? "")).child(div().text_color(t.dim).child(when(c.at)))
                 .when(Boolean(c.extra), (e) => e.child(div().text_color(t.muted).child(c.extra))))
-              .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-c-${c.id}`, c.body))))))));
+              .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-c-${c.id}`, c.body))))))))
+      .when(Boolean(menu), (e) => e.child(menu));
   }
 
   // The right-click menu of a row.
