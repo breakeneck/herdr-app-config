@@ -424,8 +424,21 @@ export default class Jira extends View {
     return v_flex().id("issue-menu").absolute().top(y).left(Math.max(4, Math.min(x, (this.width ?? w) - w - 4))).w(w).p(4).gap(1)
       .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .on_mouse_down_out((_e, cx) => { this.menu = null; cx.notify(); })
-      .child(item("menu-open", "Go to Jira", () => exec("open", [this.url(key)])))
-      .child(item("menu-copy-key", `Copy ${key}`, (cx) => cx.write_to_clipboard(key)));
+      .children(this.menuItems(key).map(([id, label, act]) => item(id, label, act)));
+  }
+
+  // A task's right-click items: Jira issues by key, Trello cards as "t:<card id>".
+  menuItems(key) {
+    if (key.startsWith("t:")) {
+      const c = this.trello.findCard(key.slice(2));
+      if (!c) return [];
+      return [["menu-open", "Open in Trello", () => exec("open", [c.shortUrl])],
+        ["menu-copy-link", "Copy link", (cx) => cx.write_to_clipboard(c.shortUrl)],
+        ["menu-copy-key", `Copy #${c.idShort}`, (cx) => cx.write_to_clipboard(`#${c.idShort}`)]];
+    }
+    return [["menu-open", "Go to Jira", () => exec("open", [this.url(key)])],
+      ["menu-copy-link", "Copy link", (cx) => cx.write_to_clipboard(this.url(key))],
+      ["menu-copy-key", `Copy ${key}`, (cx) => cx.write_to_clipboard(key)]];
   }
 
   startDrag(cx) { this.dragging = true; this.dragged = true; cx.notify(); }

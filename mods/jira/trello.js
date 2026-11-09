@@ -168,6 +168,11 @@ export class Trello {
         .child(svg("mods/jira/trello.svg").size(13).text_color(t.dim)).child(div().flex_1().min_w(0).truncate().child(b.name))));
   }
 
+  findCard(id) {
+    for (const lists of Object.values(this.lists)) for (const l of lists) { const c = l.cards.find((x) => x.id === id); if (c) return c; }
+    return null;
+  }
+
   count(boardId) {
     return (this.lists[boardId] ?? []).reduce((n, l) => n + this.visible(l).length, 0);
   }
@@ -206,6 +211,9 @@ export class Trello {
         v.openTrelloCard(c.id);
       })
       .on_mouse_down("left", (e) => { v.press = key; v.pressAt = e.position; v.dragging = false; v.dragged = false; })
+      // The panel's own right-press handler (it runs next) places the menu.
+      .on_mouse_down("right", () => { v.menuKey = key; })
+      .when(v.menu?.key === key, (s) => s.bg(t.selected))
       .on_mouse_move((e, cx) => v.maybeStartDrag(e, cx))
       .on_hover((h, cx) => { if (!h && v.press === key && !v.dragging) v.startDrag(cx); })
       .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${c.idShort}`))
