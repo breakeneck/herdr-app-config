@@ -132,8 +132,8 @@ export default class Prs extends View {
     this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no sound for what already was)
     // Auto-sync (the minute poll and its sound) can be switched off; remembered. Refresh still works by hand.
     // All open PRs/MRs of the repo, or only mine; remembered.
-    this.mine = (() => { try { return localStorage.getItem("mine") === "1"; } catch { return false; } })();
-    this.auto = (() => { try { return localStorage.getItem("auto") !== "0"; } catch { return true; } })();
+    this.mine = (() => { try { return (localStorage.getItem("prs:mine") ?? localStorage.getItem("mine")) === "1"; } catch { return false; } })();
+    this.auto = (() => { try { return (localStorage.getItem("prs:auto") ?? localStorage.getItem("auto")) !== "0"; } catch { return true; } })();
     this.fetching = new Set(); // repo keys being fetched one by one (a project switch)
     // The last lists and folder→repo answers survive restarts: a switch shows them at once.
     this.loadCache();
@@ -145,19 +145,22 @@ export default class Prs extends View {
   }
 
   // Cache: one list per mode (All / Mine) in localStorage, plus the folder → repo answers.
-  cacheKey() { return `cache:${this.mine ? "mine" : "all"}`; }
+  // Keys carry a "prs:" prefix: another mod's store once got these written into it (and this one
+  // theirs), so each key is ours alone and every entry is type-checked; unprefixed keys are read once.
+  cacheKey() { return `prs:cache:${this.mine ? "mine" : "all"}`; }
   loadCache() {
     try {
       // Lists cached before PRs carried their repo can't drive the menu or popup: dropped (re-fetched).
-      this.byRepo = new Map(JSON.parse(localStorage.getItem(this.cacheKey()) ?? "[]").filter(([, e]) => (e.prs ?? []).every((pr) => pr.repo)));
-      for (const [id, r] of JSON.parse(localStorage.getItem("remotes") ?? "[]")) this.remotes.set(id, r);
+      const old = (k) => localStorage.getItem(k) ?? localStorage.getItem(k.slice(4)) ?? "[]";
+      this.byRepo = new Map(JSON.parse(old(this.cacheKey())).filter(([, e]) => e && typeof e === "object" && (e.prs ?? []).every((pr) => pr.repo)));
+      for (const [id, r] of JSON.parse(old("prs:remotes"))) if (r && typeof r === "object" && r.key) this.remotes.set(id, r);
     } catch { this.byRepo = new Map(); }
   }
   saveCache() {
     try {
       // Only real lists: errors and token prompts are asked again.
       localStorage.setItem(this.cacheKey(), JSON.stringify([...this.byRepo].filter(([, e]) => !e.error && !e.needToken)));
-      localStorage.setItem("remotes", JSON.stringify([...this.remotes]));
+      localStorage.setItem("prs:remotes", JSON.stringify([...this.remotes]));
     } catch {}
   }
 
@@ -168,14 +171,14 @@ export default class Prs extends View {
 
   toggleMine(cx) {
     this.mine = !this.mine;
-    try { localStorage.setItem("mine", this.mine ? "1" : "0"); } catch {}
+    try { localStorage.setItem("prs:mine", this.mine ? "1" : "0"); } catch {}
     this.seen = null; this.loadCache(); this.show(); cx.notify();
     this.poll(cx);
   }
 
   toggleAuto(cx) {
     this.auto = !this.auto;
-    try { localStorage.setItem("auto", this.auto ? "1" : "0"); } catch {}
+    try { localStorage.setItem("prs:auto", this.auto ? "1" : "0"); } catch {}
     if (this.auto) this.poll(cx); else cx.notify();
   }
 

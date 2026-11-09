@@ -152,8 +152,10 @@ export default class Jira extends View {
     if (props()?.trelloCard) { this.trello = new Trello(this); this.trello.account = props().account; this.cardPopup = true; this.trello.loadCard(props().trelloCard, cx); return; }
     this.jst = {}; // Jira account id -> its list state (issues, columns, ...), see st()
     this.trello = new Trello(this);
-    // `${on}|${cwd}` -> repo key; entries that aren't a key (wb-prs's own "remotes" objects found their way in once) are dropped.
-    this.remotes = new Map(store.get("remotes", []).filter(([, v]) => typeof v === "string"));
+    // `${on}|${cwd}` -> repo key, under "tasks:remotes" (wb-prs's "remotes" objects once landed in this
+    // store under the plain name); the old key is read once, and entries that aren't a key are dropped.
+    const rem = store.get("tasks:remotes", null) ?? store.get("remotes", []);
+    this.remotes = new Map((Array.isArray(rem) ? rem : []).filter((e) => Array.isArray(e) && typeof e[1] === "string"));
     this.loc = null; this.repo = null; this.picking = false; this.trelloForm = false; this.choosing = false; this.jform = null;
     this.press = null; this.dragging = false; // a pressed issue row, and whether it's being dragged
     this.saving = false; this.formError = null; this.query = "";
@@ -234,7 +236,7 @@ export default class Jira extends View {
     cx.spawn(async (cx) => {
       const r = await exec("git", ["remote", "get-url", "origin"], { cwd: loc.cwd, on: loc.on }).catch(() => null);
       const repo = (r?.code === 0 && remoteKey(r.stdout.trim())) || lk;
-      this.remotes.set(lk, repo); store.set("remotes", [...this.remotes]);
+      this.remotes.set(lk, repo); store.set("tasks:remotes", [...this.remotes]);
       if (this.loc === lk) { this.repo = repo; this.activate(cx); }
     });
   }

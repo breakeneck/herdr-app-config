@@ -26,7 +26,7 @@ No preview image is published: the header shows the repository owner and, for re
 - `mods/wb-prs/`: `main.js`, `ai.js`, `secrets.js`, `section.js`, icons. Optional partner: `wb-ai` (model list window).
 - Programs: `gh`, `git`, `claude`, `codex` (through `ai.js`), `security`, `open`, `rm`. Network: GitHub through `gh`; `https://<host>/api/v4` for GitLab; an optional local OpenAI-compatible server (`/models`, `/chat/completions`) for AI models.
 - Token: Keychain service `herdr-gitlab`, account is the host.
-- State: `localStorage` (`cache:all`, `cache:mine`, `remotes`, `mine`, `auto`); shared `wb.prs.changed`, `wb.ai.models`, `wb.ai.use`, `wb.ai.reviewDrafts`, `wb.commit.gen`, `wb.layout.*`, `wb.sections.collapsed`.
+- State: `localStorage` (`prs:cache:all`, `prs:cache:mine`, `prs:remotes`, `prs:mine`, `prs:auto`; the unprefixed names of earlier builds are read once); shared `wb.prs.changed`, `wb.ai.models`, `wb.ai.use`, `wb.ai.reviewDrafts`, `wb.commit.gen`, `wb.layout.*`, `wb.sections.collapsed`.
 - `ai.js`, `secrets.js` and `section.js` are synced copies (`scripts/sync-helpers.sh`).
 
 ## Watch out
