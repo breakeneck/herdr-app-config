@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, theme, notify, playSound } from "herdr";
+import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-base";
+import { spaces, panes, focused, exec, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
 
 // My open pull requests in the repo of the focused folder. Click opens it in the browser.
@@ -51,8 +51,8 @@ async function gitlabToken(host) {
   const r = await exec("security", ["find-generic-password", "-s", GL_SERVICE, "-a", host, "-w"]).catch(() => null);
   return r?.code === 0 ? r.stdout.trim() || null : null;
 }
-async function gitlab(host, token, path) {
-  const r = await fetch(`https://${host}/api/v4${path}`, { headers: { "PRIVATE-TOKEN": token, Accept: "application/json" } });
+async function gitlab(host, token, path, method = "GET") {
+  const r = await fetch(`https://${host}/api/v4${path}`, { method, headers: { "PRIVATE-TOKEN": token, Accept: "application/json" } });
   if (!r.ok) throw Object.assign(new Error(`GitLab ${r.status}: ${(await r.text()).slice(0, 160)}`), { status: r.status });
   return r.json();
 }
@@ -69,15 +69,30 @@ async function listGitlab(host, path, token, mine) {
   const mrs = await gitlab(host, token, `${project}/merge_requests?state=opened&scope=${mine ? "created_by_me" : "all"}&per_page=100`);
   // The list has no pipeline: one detail call per MR (a handful).
   return Promise.all(mrs.map(async (mr) => {
-    const d = await gitlab(host, token, `${project}/merge_requests/${mr.iid}`).catch(() => mr);
-    return { provider: "gitlab", author: mr.author?.name ?? mr.author?.username ?? "", number: mr.iid, title: mr.title, headRefName: mr.source_branch, isDraft: Boolean(mr.draft ?? mr.work_in_progress),
+    const [d, a] = await Promise.all([
+      gitlab(host, token, `${project}/merge_requests/${mr.iid}`).catch(() => mr),
+      gitlab(host, token, `${project}/merge_requests/${mr.iid}/approvals`).catch(() => null),
+    ]);
+    return { approvedBy: (a?.approved_by ?? []).map((x) => x.user?.name ?? x.user?.username).filter(Boolean), mineApproved: Boolean(a?.user_has_approved),
+      provider: "gitlab", author: mr.author?.name ?? mr.author?.username ?? "", number: mr.iid, title: mr.title, headRefName: mr.source_branch, isDraft: Boolean(mr.draft ?? mr.work_in_progress),
       url: mr.web_url, ci: pipelineState(d.head_pipeline?.status ?? d.pipeline?.status), badge: MERGE_LABEL[d.detailed_merge_status] ?? null };
   }));
 }
 
+// GitHub: who approved (each reviewer's latest decisive review), from gh's `reviews`.
+function ghApprovals(pr, me) {
+  const last = new Map();
+  for (const r of pr.reviews ?? []) if (["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) last.set(r.author?.login, r.state);
+  const by = [...last].filter(([, st]) => st === "APPROVED").map(([login]) => login).filter(Boolean);
+  return { approvedBy: by, mineApproved: Boolean(me && by.includes(me)) };
+}
+const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
+
 export default class Prs extends View {
   init(_props, cx) {
-    this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = "";
+    // Opened as a popup for one PR/MR (click on a row): its description, comments and approvals.
+    if (props()?.pr) { this.detailPr = props().pr; this.loadDetail(cx); return; }
+    this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = ""; this.started = Date.now();
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
     this.focusRepo = null;
@@ -105,7 +120,8 @@ export default class Prs extends View {
   cacheKey() { return `cache:${this.mine ? "mine" : "all"}`; }
   loadCache() {
     try {
-      this.byRepo = new Map(JSON.parse(localStorage.getItem(this.cacheKey()) ?? "[]"));
+      // Lists cached before PRs carried their repo can't drive the menu or popup: dropped (re-fetched).
+      this.byRepo = new Map(JSON.parse(localStorage.getItem(this.cacheKey()) ?? "[]").filter(([, e]) => (e.prs ?? []).every((pr) => pr.repo)));
       for (const [id, r] of JSON.parse(localStorage.getItem("remotes") ?? "[]")) this.remotes.set(id, r);
     } catch { this.byRepo = new Map(); }
   }
@@ -150,11 +166,124 @@ export default class Prs extends View {
   // Open MRs/PRs of one repo: gh for github.com, the GitLab API for anything else.
   async fetchRepo(r) {
     if (!r.host) throw new Error("No git remote (origin) in this folder");
-    if (r.host === "github.com") return list(r.cwd, r.on, this.mine);
+    // Each PR knows its repo, so its menu and popup can act on it.
+    const repo = { key: r.key, name: r.name, host: r.host, path: r.path, cwd: r.cwd, on: r.on };
+    if (r.host === "github.com") {
+      const me = await this.ghLogin(r.on);
+      return (await list(r.cwd, r.on, this.mine)).map((pr) => ({ ...pr, ...ghApprovals(pr, me), repo }));
+    }
     const token = await gitlabToken(r.host);
     if (!token) throw Object.assign(new Error(`No GitLab token for ${r.host}`), { needToken: r.host });
-    try { return await listGitlab(r.host, r.path, token, this.mine); }
+    try { return (await listGitlab(r.host, r.path, token, this.mine)).map((pr) => ({ ...pr, repo })); }
     catch (e) { if (e.status === 401) throw Object.assign(new Error(`${r.host} rejected the saved token`), { needToken: r.host }); throw e; }
+  }
+
+  // My GitHub login on a machine (gh's account there), asked once.
+  async ghLogin(on) {
+    this.ghMe ??= {};
+    if (!(on in this.ghMe)) {
+      const r = await exec("gh", ["api", "user", "--jq", ".login"], { on }).catch(() => null);
+      this.ghMe[on] = r?.code === 0 ? r.stdout.trim() : null;
+    }
+    return this.ghMe[on];
+  }
+
+  // Approve / take the approval back. GitLab both ways; GitHub can only approve (taking it back
+  // is a dismissal, which needs admin rights). The panel re-fetches that repo afterwards.
+  setApproval(pr, approve, cx) {
+    const r = pr.repo;
+    cx.spawn(async (cx) => {
+      try {
+        if (pr.provider === "gitlab") {
+          const token = await gitlabToken(r.host);
+          await gitlab(r.host, token, `/projects/${encodeURIComponent(r.path)}/merge_requests/${pr.number}/${approve ? "approve" : "unapprove"}`, "POST");
+        } else {
+          if (!approve) throw new Error("GitHub can't take an approval back from here");
+          const x = await exec("gh", ["pr", "review", String(pr.number), "--approve"], { cwd: r.cwd, on: r.on });
+          if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim());
+        }
+        notify({ title: approve ? "Approved" : "Approval removed", body: `${pr.provider === "gitlab" ? "!" : "#"}${pr.number} ${pr.title}`, level: "success" });
+      } catch (e) {
+        notify({ title: "Approval failed", body: e.status === 403 ? "The token can't approve: it needs the api scope" : String(e.message ?? e), level: "error" });
+      }
+      setShared("prs.changed", { repo: r, ts: Date.now() });
+      if (this.detailPr) this.loadDetail(cx);
+      else this.refreshOne(r, cx);
+    });
+  }
+
+  // ── the PR/MR popup ──
+  loadDetail(cx) {
+    const pr = this.detailPr, r = pr.repo;
+    cx.spawn(async (cx) => {
+      try {
+        if (pr.provider === "gitlab") {
+          const token = await gitlabToken(r.host), base = `/projects/${encodeURIComponent(r.path)}/merge_requests/${pr.number}`;
+          const [mr, a, notes] = await Promise.all([gitlab(r.host, token, base), gitlab(r.host, token, `${base}/approvals`).catch(() => null),
+            gitlab(r.host, token, `${base}/notes?sort=asc&order_by=created_at&per_page=100`).catch(() => [])]);
+          this.detail = { title: mr.title, body: mr.description ?? "", author: mr.author?.name, from: mr.source_branch, to: mr.target_branch,
+            created: mr.created_at, url: mr.web_url, approvedBy: (a?.approved_by ?? []).map((x) => x.user?.name), mineApproved: Boolean(a?.user_has_approved),
+            comments: notes.filter((n) => !n.system).map((n) => ({ id: n.id, author: n.author?.name, at: n.created_at, body: n.body, extra: n.type === "DiffNote" ? n.position?.new_path : null })) };
+        } else {
+          const x = await exec("gh", ["pr", "view", String(pr.number), "--json", "title,body,author,url,headRefName,baseRefName,createdAt,comments,reviews"], { cwd: r.cwd, on: r.on });
+          if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim());
+          const v = JSON.parse(x.stdout), ap = ghApprovals(v, await this.ghLogin(r.on));
+          const items = [...(v.comments ?? []).map((c) => ({ author: c.author?.login, at: c.createdAt, body: c.body })),
+            ...(v.reviews ?? []).filter((rv) => rv.body || rv.state !== "COMMENTED").map((rv) => ({ author: rv.author?.login, at: rv.submittedAt, body: rv.body, extra: rv.state.toLowerCase().replace("_", " ") }))]
+            .sort((p, q) => String(p.at).localeCompare(String(q.at))).map((c, i) => ({ ...c, id: i }));
+          this.detail = { title: v.title, body: v.body ?? "", author: v.author?.login, from: v.headRefName, to: v.baseRefName, created: v.createdAt, url: v.url, ...ap, comments: items };
+        }
+        this.detailError = null;
+      } catch (e) { this.detailError = String(e.message ?? e); }
+      cx.notify();
+    });
+  }
+
+  detailView(t) {
+    const pr = this.detailPr, d = this.detail, gl = pr.provider === "gitlab", num = `${gl ? "!" : "#"}${pr.number}`;
+    const btn = (id, label, act, primary = false) => div().id(id).h(26).px(10).flex().items_center().rounded(6).border_1().text_size(12).cursor_pointer()
+      .border_color(primary ? t.done : t.border).text_color(primary ? t.done : t.foreground).hover((s) => s.bg(t.hover)).on_click(act).child(label);
+    const meta = (label, value) => !value ? null : h_flex().gap(8).items_center().text_size(12)
+      .child(div().w(80).flex_none().text_color(t.dim).child(label)).child(div().flex_1().min_w(0).truncate().child(value));
+    const canApprove = d && (gl || !d.mineApproved);
+    return v_flex().id("pr-detail").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(h_flex().h(44).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(div().text_size(12).text_color(t.dim).child(num))
+        .when(Boolean(d?.approvedBy?.length), (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(t.done).text_size(11).text_color(t.done).child(`✓ approved · ${d.approvedBy.length}`)))
+        .child(div().flex_1())
+        .when(Boolean(canApprove), (e) => e.child(btn("approve", d.mineApproved ? "Remove approval" : "Approve", (_e, cx) => this.setApproval(pr, !d.mineApproved, cx), !d.mineApproved)))
+        .child(btn("open", "Open", () => exec("open", [pr.url])))
+        .child(btn("copy", "Copy link", (_e, cx) => cx.write_to_clipboard(pr.url)))
+        .child(div().id("close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
+          .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => closeOverlay(props()?.overlay)).child("✕")))
+      .child(v_flex().id("pr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(14).gap(14)
+        .when(!d, (e) => e.child(div().text_color(this.detailError ? t.ansi1 : t.dim).child(this.detailError ?? "Loading…")))
+        .when(Boolean(d), (e) => e
+          .child(div().text_size(17).font_semibold().child(d.title))
+          .child(v_flex().gap(5).children([meta("Author", d.author), meta("Branches", `${d.from} → ${d.to}`), meta("Opened", when(d.created)),
+            meta("Approved by", d.approvedBy.length ? d.approvedBy.join(", ") : "nobody yet")].filter(Boolean)))
+          .child(div().h(1).bg(t.border))
+          .child(d.body.trim() ? TextView.markdown(`pr-desc-${pr.number}`, d.body) : div().text_color(t.dim).child("No description"))
+          .when(d.comments.length > 0, (e) => e
+            .child(div().h(1).bg(t.border))
+            .child(div().text_size(11).font_semibold().text_color(t.dim).child(`COMMENTS · ${d.comments.length}`))
+            .children(d.comments.map((c) => v_flex().gap(4).p(10).rounded(8).bg(t.raised)
+              .child(h_flex().gap(8).text_size(11).child(div().font_semibold().child(c.author ?? "")).child(div().text_color(t.dim).child(when(c.at)))
+                .when(Boolean(c.extra), (e) => e.child(div().text_color(t.muted).child(c.extra))))
+              .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-c-${c.id}`, c.body))))))));
+  }
+
+  // The right-click menu of a row.
+  menuView(t) {
+    const { pr, x, y } = this.menu, w = 200, gl = pr.provider === "gitlab";
+    const item = (id, label, action) => div().id(id).h(26).px(10).flex().items_center().rounded(5).cursor_pointer().text_size(12)
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.menu = null; action(cx); cx.notify(); }).child(label);
+    return v_flex().id("pr-menu").absolute().top(y).left(Math.max(4, Math.min(x, (this.width ?? w) - w - 4))).w(w).p(4).gap(1)
+      .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .on_mouse_down_out((_e, cx) => { this.menu = null; cx.notify(); })
+      .child(item("m-open", "Open in browser", () => exec("open", [pr.url])))
+      .child(item("m-copy", "Copy link", (cx) => cx.write_to_clipboard(pr.url)))
+      .when(gl || !pr.mineApproved, (e) => e.child(item("m-approve", pr.mineApproved ? "Remove approval" : "Approve", (cx) => this.setApproval(pr, !pr.mineApproved, cx))));
   }
 
   // Checks a pasted token against the host, then keeps it in the Keychain and polls again.
@@ -261,7 +390,10 @@ export default class Prs extends View {
     const cp = copilot(pr);
     return v_flex().id(`pr-${pr.number}`).flex_none().px(8).py(4).gap(2).rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}`)
-      .on_click(() => exec("open", [pr.url]))
+      .when(this.menu?.pr?.url === pr.url, (s) => s.bg(t.selected))
+      // Click: the whole PR/MR in a popup; right-click: its menu (placed by the panel's handler).
+      .on_click(() => openOverlay({ mod: "prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }))
+      .on_mouse_down("right", () => { this.menuPr = pr; })
       .child(h_flex().gap(6).items_center()
         .child(div().flex_none().size(7).rounded(4).bg(dot ?? t.border))
         // Copilot badge "C" (GitHub only): filled green = reviewed, yellow outline = requested, faint = not asked.
@@ -273,6 +405,10 @@ export default class Prs extends View {
         .child(div().flex_none().text_size(11).text_color(t.dim).child(`${gl ? "!" : "#"}${pr.number}`))
         .child(div().flex_1().min_w(0).truncate().child(pr.title))
         .when(pr.isDraft,(e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("draft")))
+        // Approvals right in the list: ✓ and how many; brighter when one of them is mine.
+        .when(Boolean(pr.approvedBy?.length), (e) => e.child(div().flex_none().px(4).rounded(3).text_size(10).font_semibold()
+          .bg(pr.mineApproved ? t.done : t.background).border_1().border_color(t.done).text_color(pr.mineApproved ? t.background : t.done)
+          .tooltip(`Approved by ${pr.approvedBy.join(", ")}${pr.mineApproved ? " (you too)" : ""}`).child(`✓${pr.approvedBy.length > 1 ? ` ${pr.approvedBy.length}` : ""}`)))
         .when(Boolean(review), (e) => e.child(div().flex_none().text_size(10).text_color(review[1]).child(review[0]))))
       .child(h_flex().pl(13).gap(6).text_size(10).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(pr.headRefName))
@@ -285,25 +421,35 @@ export default class Prs extends View {
       .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
     return v_flex().p(8).gap(8).text_color(t.muted)
       .child(div().text_color(t.foreground).font_semibold().child(`Connect ${host}`))
-      .child(div().text_size(11).child("A personal access token with the read_api scope lets this panel list your merge requests."))
+      .child(div().text_size(11).child("A personal access token with the api scope lets this panel list merge requests and approve them (read_api: list only)."))
       .child(div().id("gl-token").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.tokenInput).h_full().w_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().gap(6)
-        .child(button("gl-open", "Create token", false, () => exec("open", [`https://${host}/-/user_settings/personal_access_tokens?name=Herdr&scopes=read_api`])))
+        .child(button("gl-open", "Create token", false, () => exec("open", [`https://${host}/-/user_settings/personal_access_tokens?name=Herdr&scopes=api`])))
         .child(button("gl-save", this.savingToken ? "Checking…" : "Save", true, (_e, cx) => this.saveToken(cx))))
       .when(Boolean(this.tokenError), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(this.tokenError)))
       .child(div().text_size(10).text_color(t.dim).child(`Checked against ${host} before saving; kept in the macOS Keychain (${GL_SERVICE}).`));
   }
 
   render(cx) {
+    if (this.detailPr) return this.detailView(theme());
     this.follow(cx);
+    // An approval made in a popup: re-fetch that repo here.
+    const changed = shared("prs.changed");
+    if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (this.changedTs > (this.started ?? 0)) this.refreshOne(changed.repo, cx); }
     const t = theme(), busy = this.loading || this.fetching.has(this.focusRepo);
     const empty = this.error || (busy && !this.prs.length ? "Loading…" : !this.prs.length ? (this.mine ? "None of mine open · All shows everyone's" : "No open pull requests") : null);
     const refresh = div().id("refresh").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => { cx.stop_propagation(); this.poll(cx); })
       .child(svg("mods/prs/refresh.svg").size(14).when(busy, (s) => s.spin(900)));
     const sec = S.sectionOf("prs"), ov = S.overlay(sec);
-    return v_flex().id("prs").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
+    return v_flex().id("prs").size_full().min_h(0).relative()
+      .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
+      .on_mouse_down("right", (e, cx) => {
+        if (!this.menuPr) return;
+        this.menu = { pr: this.menuPr, x: e.local_position?.x ?? 8, y: e.local_position?.y ?? 8 }; this.menuPr = null;
+        cx.stop_propagation(); cx.notify();
+      }).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
       .child(S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
         .child(S.mark(sec))
         .child(div().font_semibold().text_size(13).child(this.provider === "gitlab" ? "Merge requests" : "Pull requests"))
@@ -326,6 +472,7 @@ export default class Prs extends View {
           .when(Boolean(empty) && !this.needToken, (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
           .children(this.prs.map((pr) => this.row(pr, t))))
         .child(Scrollbar.vertical("prs-list").absolute().inset_0()))
+      .when(Boolean(this.menu), (e) => e.child(this.menuView(t)))
       .when(Boolean(ov), (e) => e.child(ov));
   }
 }
