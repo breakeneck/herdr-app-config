@@ -248,7 +248,7 @@ export default class Spaces extends View {
 
   menu(w) {
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
+    openOverlay({ mod: "wb-menu", kind: "popup", width: 230, height: 300, props: { tab: "space", target: { id: w.id, name: w.name } } });
   }
 
   orderingDue(now) {

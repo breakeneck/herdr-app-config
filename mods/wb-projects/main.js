@@ -170,6 +170,7 @@ export default class RemoteProjects extends View {
       .hover((s) => s.bg(t.hover))
       .on_hover((h, cx) => { this.over = h ? id : this.over === id ? null : this.over; cx.notify(); })
       .on_click(() => this.open(p))
+      .on_mouse_down("right", () => openOverlay({ mod: "wb-menu", kind: "popup", width: 230, height: 160, props: { tab: "project", target: { name: p.name } } }))
       .child(div().relative().flex_none().size(30).rounded(7).bg(colorOf(p.name))
         .flex().items_center().justify_center().text_size(12).font_bold().text_color("#ffffff")
         .child(initials(p.name))
