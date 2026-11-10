@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, Textarea } from "gpui-base";
-import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
 import { migrateAi, models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
 import { getSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
@@ -126,11 +126,8 @@ export default class Prs extends View {
     this.tokenInput.set_masked(true);
     this.tokenInput.on("submit", (_e, cx) => this.saveToken(cx));
     this.tokenError = null; this.savingToken = false;
-    this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no sound for what already was)
-    // Auto-sync (the minute poll and its sound) can be switched off; remembered. Refresh still works by hand.
     // All open PRs/MRs of the repo, or only mine; remembered.
     this.mine = (() => { try { return (localStorage.getItem("prs:mine") ?? localStorage.getItem("mine")) === "1"; } catch { return false; } })();
-    this.auto = (() => { try { return (localStorage.getItem("prs:auto") ?? localStorage.getItem("auto")) !== "0"; } catch { return true; } })();
     this.fetching = new Set(); // repo keys being fetched one by one (a project switch)
     // The last lists and folder→repo answers survive restarts: a switch shows them at once.
     this.loadCache();
@@ -138,7 +135,6 @@ export default class Prs extends View {
     this.poll(cx);
     // The folder follows focus: render notices a switch at once; this catches a `cd` inside a terminal.
     cx.timer.every(2000, (cx) => this.follow(cx));
-    cx.timer.every(60 * 1000, (cx) => { if (this.auto) this.poll(cx); });
   }
 
   // Cache: one list per mode (All / Mine) in localStorage, plus the folder → repo answers.
@@ -169,14 +165,8 @@ export default class Prs extends View {
   toggleMine(cx) {
     this.mine = !this.mine;
     try { localStorage.setItem("prs:mine", this.mine ? "1" : "0"); } catch {}
-    this.seen = null; this.loadCache(); this.show(); cx.notify();
+    this.loadCache(); this.show(); cx.notify();
     this.poll(cx);
-  }
-
-  toggleAuto(cx) {
-    this.auto = !this.auto;
-    try { localStorage.setItem("prs:auto", this.auto ? "1" : "0"); } catch {}
-    if (this.auto) this.poll(cx); else cx.notify();
   }
 
   // The repo a place belongs to: `{ key, name, host, path }`. Folders (and worktrees) of one repo share the key.
@@ -436,10 +426,10 @@ export default class Prs extends View {
   show() {
     const e = this.byRepo.get(this.focusRepo);
     this.prs = e?.prs ?? []; this.repo = e?.name ?? ""; this.needToken = e?.needToken ?? null; this.provider = e?.provider ?? null;
-    this.error = e?.error ?? (!location().cwd ? "No folder" : !e && !this.auto ? "Auto-sync is off · press refresh" : null);
+    this.error = e?.error ?? (!location().cwd ? "No folder" : null);
   }
 
-  // A project switch: show that repo's list from the cache right away, then (auto-sync on) refresh
+  // A project switch: show that repo's list from the cache right away, then refresh
   // just that repo in the background when its list is older than 30 s or missing.
   focus(cx) {
     const k = this.key, loc = location();
@@ -448,7 +438,7 @@ export default class Prs extends View {
       if (key() !== k) return; // switched again meanwhile: that switch handles it
       this.focusRepo = r.key; this.show(); cx.notify();
       const e = this.byRepo.get(r.key);
-      if (this.auto && r.host && loc.cwd && (!e || e.error || Date.now() - (e.at ?? 0) > 30000)) this.refreshOne({ ...r, ...loc }, cx);
+      if (r.host && loc.cwd && (!e || e.error || Date.now() - (e.at ?? 0) > 30000)) this.refreshOne({ ...r, ...loc }, cx);
     });
   }
 
@@ -460,8 +450,6 @@ export default class Prs extends View {
       try {
         const prs = await this.fetchRepo(r);
         this.byRepo.set(r.key, { name: r.name, prs, error: null, provider: r.host === "github.com" ? "github" : "gitlab", at: Date.now() });
-        // Copilot news needs the poll's baseline; keep it current for what this fetch saw.
-        if (this.seen) for (const pr of prs) if (!this.seen.has(pr.url)) this.seen.set(pr.url, copilot(pr));
       } catch (e) { this.byRepo.set(r.key, { name: r.name, prs: old?.prs ?? [], error: e.needToken ? null : String(e.message ?? e), needToken: e.needToken ?? null, provider: r.host === "github.com" ? "github" : "gitlab" }); }
       finally {
         this.fetching.delete(r.key); this.saveCache();
@@ -471,10 +459,8 @@ export default class Prs extends View {
     });
   }
 
-  // Every minute (and on demand): the open PRs of every repo among all spaces' folders and the focused one,
-  // one gh call per repo. A sound and a toast when Copilot's review shows up on a PR that was already there.
-  // Runs even while the panel is hidden.
-  // ponytail: in memory only (a reload re-baselines).
+  // On start and on the refresh button: the open PRs of every repo among all spaces' folders and the focused one,
+  // one gh call per repo. No timer: a project switch refreshes its own repo when the list is stale.
   poll(cx) {
     if (this.loading) { this.again = true; return; }
     this.loading = true; cx.notify();
@@ -484,22 +470,15 @@ export default class Prs extends View {
       try {
         const repos = new Map();
         for (const p of places.values()) { const r = await this.repoOf(p); if (!repos.has(r.key)) repos.set(r.key, { ...r, ...p }); }
-        const next = new Map(), done = [];
-        await Promise.all([...repos].map(async ([k, r]) => {
+                await Promise.all([...repos].map(async ([k, r]) => {
           const old = this.byRepo.get(k);
           try {
             const prs = await this.fetchRepo(r);
             this.byRepo.set(k, { name: r.name, prs, error: null, provider: r.host === "github.com" ? "github" : "gitlab", at: Date.now() });
-            for (const pr of prs) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) { this.byRepo.set(k, { name: r.name, prs: old?.prs ?? [], error: e.needToken ? null : String(e.message ?? e), needToken: e.needToken ?? null, provider: "gitlab" }); }
         }));
-        for (const [url, { state, pr }] of next) if (this.seen?.get(url) !== undefined && this.seen.get(url) !== "done" && state === "done") done.push(pr);
-        // A failed repo drops out of `next`; keep its old states so a later success isn't mistaken for news.
-        this.seen = new Map([...(this.seen ?? []), ...[...next].map(([url, { state }]) => [url, state])]);
         // Where focus is now (it may have moved during the poll).
         this.focusRepo = (await this.repoOf(location())).key; this.show(); this.saveCache();
-        for (const pr of done) notify({ title: "Copilot reviewed", body: `#${pr.number} ${pr.title}`, level: "info" });
-        if (done.length) playSound("done");
       } catch (e) { this.error = String(e.message ?? e); }
       finally {
         this.loading = false; cx.notify();
@@ -590,11 +569,6 @@ export default class Prs extends View {
             .bg(this.mine === v ? t.selected : t.background).text_color(this.mine === v ? t.foreground : t.muted)
             .tooltip(v ? "Only the ones I opened" : "Every open one in this repo")
             .on_click((_e, cx) => { cx.stop_propagation(); if (this.mine !== v) this.toggleMine(cx); }).child(label))))
-        .child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-          .tooltip(this.auto ? "Auto-sync every minute (with Copilot sound): on" : "Auto-sync: off · refresh by hand").on_click((_e, cx) => { cx.stop_propagation(); this.toggleAuto(cx); })
-          .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
-            .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
-          .child(div().text_size(10).text_color(t.muted).child("Auto")))
         .child(refresh))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("prs-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
