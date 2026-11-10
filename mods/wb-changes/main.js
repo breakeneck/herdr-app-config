@@ -28,6 +28,8 @@ const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.a
 // Commit message drafts survive switching windows, spaces and folders: shared "wb.commit.drafts" = { [repoId]: { text, at } },
 // repoId = "<machine|local>:<git toplevel>". A running generation is shared "wb.commit.generating" = { [repoId]: startedAt },
 // so every copy (and a return to that repo) shows it; its result always lands in that repo's draft.
+const COMMIT_ACTION = "wb.commit.action"; // "commit" | "push": what the Commit button does
+const commitAction = () => (shared(COMMIT_ACTION) === "push" ? "push" : "commit");
 const DRAFTS = "wb.commit.drafts", GENERATING = "wb.commit.generating";
 const BOOT = Date.now(); // module load: a flag started before it belongs to code that no longer runs (hot reload, restart)
 const repoIdOf = (on, root) => `${on ?? "local"}:${root}`;
@@ -339,10 +341,21 @@ export default class Changes extends View {
       .when(!installed("wb-ai"), (e) => e.child(div().px(10).py(6).text_size(12).text_color(t.dim).child("Install wb-ai to pick models; using the default Claude CLI.")));
   }
 
+  // The ▾ beside Commit: Commit or Commit and Push, the current one checked.
+  commitMenuView() {
+    const t = theme(), cur = commitAction();
+    return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
+      .children([["commit", "Commit"], ["push", "Commit and Push"]].map(([id, label]) => h_flex().id(`ca-${id}`).h(30).px(10).gap(8).items_center().rounded(6).cursor_pointer()
+        .text_size(12.5).hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click(() => { setShared(COMMIT_ACTION, id); closeOverlay(props()?.overlay); })
+        .child(div().w(14).text_size(12).text_color(t.accent).child(id === cur ? "✓" : "")).child(label)));
+  }
+
   commit(cx) {
     if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== key()) return;
-    const root = this.root, on = this.on, context = this.context, message = this.message.trim(), id = this.repoId;
-    this.busy = true; this.note = null;
+    const root = this.root, on = this.on, context = this.context, message = this.message.trim(), id = this.repoId, push = commitAction() === "push";
+    this.busy = true; this.note = null; this.phase = "Committing…";
     cx.spawn(async (cx) => {
       try {
         for (const args of [["add", "-A"], ["commit", "-m", message]]) {
@@ -351,8 +364,16 @@ export default class Changes extends View {
         }
         storeDraft(id, "");
         if (key() === context) this.setText("");
-      } catch (e) { if (key() === context) this.note = `Commit failed: ${e}`; }
-      finally { this.busy = false; this.refresh(cx); cx.notify(); }
+      } catch (e) { if (key() === context) this.note = `Commit failed: ${e}`; this.busy = false; this.refresh(cx); cx.notify(); return; }
+      if (push) {
+        try {
+          this.phase = "Pushing…"; cx.notify();
+          const up = await exec("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: root, on });
+          const r = await exec("git", up.code === 0 ? ["push"] : ["push", "-u", "origin", "HEAD"], { cwd: root, on, timeout: 600000 });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+        } catch (e) { if (key() === context) this.note = `Committed, but push failed: ${e}`; }
+      }
+      this.busy = false; this.refresh(cx); cx.notify();
     });
     cx.notify();
   }
@@ -365,6 +386,7 @@ export default class Changes extends View {
 
   render(cx) {
     if (props()?.menu) return this.menuView();
+    if (props()?.commitMenu) return this.commitMenuView();
     if (key() !== this.context) this.refresh(cx);
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree";
@@ -424,7 +446,11 @@ export default class Changes extends View {
               .child(generating ? "Generating…" : "Generate"))
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 130, props: { menu: true, project: this.pk } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
-          .child(div().id("commit").h(30).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit"))))
+          .child(h_flex().id("commit").h(30).flex_none().rounded(8).overflow_hidden().bg(enabled ? t.solid : t.raised)
+            .child(h_flex().id("commit-run").px(14).h_full().items_center().text_size(12).text_color(enabled ? t.solid_foreground : t.dim).when(enabled, (e) => e.cursor_pointer()).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.commit(cx))
+              .tooltip(commitAction() === "push" ? "Stage everything, commit with this message, then push (sets origin upstream if the branch has none)" : "Stage everything and commit with this message")
+              .child(this.busy ? (this.phase ?? "Committing…") : commitAction() === "push" ? "Commit and Push" : "Commit"))
+            .child(div().id("commit-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(enabled ? t.solid_foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Commit or Commit and Push").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 190, height: 74, props: { commitMenu: true } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))))
       .when(Boolean(ov), (e) => e.child(ov));
   }
 }
