@@ -453,7 +453,7 @@ export default class Prs extends View {
     cx.spawn(async (cx) => {
       const r = await this.repoOf(loc);
       if (!r.host || !loc.cwd) { notify({ title: "No git remote (origin) in this folder", level: "error" }); return; }
-      openOverlay({ mod: "wb-prs", kind: "dialog", width: 620, height: 0.85, props: { create: { repo: { ...r, ...loc } } } });
+      openOverlay({ mod: "wb-prs", kind: "dialog", modal: true, width: 620, height: 0.85, props: { create: { repo: { ...r, ...loc } } } });
     });
   }
 
@@ -485,7 +485,7 @@ export default class Prs extends View {
       try {
         const repos = new Map();
         for (const p of places.values()) { const r = await this.repoOf(p); if (!repos.has(r.key)) repos.set(r.key, { ...r, ...p }); }
-                await Promise.all([...repos].map(async ([k, r]) => {
+        await Promise.all([...repos].map(async ([k, r]) => {
           const old = this.byRepo.get(k);
           try {
             const prs = await this.fetchRepo(r);

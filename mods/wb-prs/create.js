@@ -5,18 +5,20 @@ import { v_flex, h_flex, Scrollbar, InputState, Input, TextareaState, Textarea }
 import { exec, notify, props, openOverlay, closeOverlay, setShared } from "herdr";
 import { models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
 
+const LONG = { timeout: 600000 };
+const BASES = ["main", "master", "develop", "production"];
 const humanize = (b) => b.replace(/^[^/]+\//, "").replace(/[-_]+/g, " ").trim() || b;
 
 export class CreateDialog {
   // deps: { gitlab, gitlabToken, installed } from main.js
   constructor(repo, deps) { this.repo = repo; this.deps = deps; }
 
-  git(args) { return exec("git", args, { cwd: this.repo.cwd, on: this.repo.on }); }
+  git(args, opts = {}) { return exec("git", args, { cwd: this.repo.cwd, on: this.repo.on, ...opts }); }
 
   init(cx) {
     this.branches = []; this.target = null; this.branch = null; this.ahead = null; this.commits = [];
     this.fetching = true; this.error = null; this.busy = ""; this.generating = false; this.aiMenu = false; this.draft = false;
-    this.autoTitle = "";
+    this.autoTitle = ""; this.fatal = false; this.def = null; this.aiClosedAt = 0;
     this.search = InputState.new({ placeholder: "Search branches…" });
     this.search.on("change", (_e, cx) => { this.filter = this.search.value(); cx.notify(); });
     this.search.on("submit", (_e, cx) => { const b = this.visible()[0]; if (b) this.pick(b, cx); });
@@ -27,43 +29,60 @@ export class CreateDialog {
       try {
         const h = await this.git(["rev-parse", "--abbrev-ref", "HEAD"]);
         this.branch = h.stdout.trim();
-        if (h.code !== 0 || this.branch === "HEAD") throw new Error("No branch is checked out (detached HEAD)");
+        if (h.code !== 0 || this.branch === "HEAD") { this.fatal = true; throw new Error("No branch is checked out (detached HEAD)"); }
         await this.loadBranches(cx);
       } catch (e) { this.error = String(e.message ?? e); }
       cx.notify();
+      if (this.fatal) { this.fetching = false; cx.notify(); return; }
       // Refresh the remote in the background, then reload the list; the dialog is usable meanwhile.
-      try { await this.git(["fetch", "--prune", "origin"]); await this.loadBranches(cx, true); } catch {}
+      try { await this.git(["fetch", "--prune", "origin"], LONG); await this.loadBranches(cx, true); } catch {}
       this.fetching = false; cx.notify();
     });
   }
 
   async loadBranches(cx, keep = false) {
-    const r = await this.git(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]);
-    this.branches = r.stdout.split("\n").map((s) => s.trim().replace(/^origin\//, "")).filter((b) => b && b !== "HEAD" && b !== "origin" && b !== this.branch);
-    if (keep && this.target && this.branches.includes(this.target)) { cx.notify(); return; }
+    const r = await this.git(["for-each-ref", "--format=%(refname:lstrip=3)", "refs/remotes/origin"]);
+    this.branches = r.stdout.split("\n").map((s) => s.trim()).filter((b) => b && b !== "HEAD" && b !== this.branch);
     const d = await this.git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
     const def = d.code === 0 ? d.stdout.trim().replace(/^origin\//, "") : null;
+    this.def = def;
+    if (keep && this.target && this.branches.includes(this.target)) { await this.pickNow(this.target, cx); return; }
     const t = [def, "main", "master", "develop"].find((b) => b && this.branches.includes(b)) ?? this.branches[0] ?? null;
     if (t) await this.pickNow(t, cx); else cx.notify();
   }
 
   visible() { const f = (this.filter ?? "").toLowerCase(); return this.branches.filter((b) => b.toLowerCase().includes(f)); }
 
-  pick(b, cx) { cx.spawn(async (cx) => { await this.pickNow(b, cx); cx.notify(); }); }
+  pick(b, cx) { if (this.fatal) return; cx.spawn(async (cx) => { await this.pickNow(b, cx); cx.notify(); }); }
+
+  // The branch the MR comes from: the upstream's name when the local branch tracks a differently named, non-base
+  // remote branch (review/1128 → origin/oleh/1128-…), else the local name.
+  async resolveSource(target) {
+    const L = this.branch;
+    const up = await this.git(["rev-parse", "--abbrev-ref", "@{u}"]);
+    const u = up.code === 0 ? up.stdout.trim() : "";
+    const X = u.startsWith("origin/") ? u.slice(7) : "";
+    if (X && ![target, this.def, ...BASES].includes(X)) return { name: X, upstream: true };
+    return { name: L, upstream: false };
+  }
 
   // Choose the target: count what's ahead and prefill the title (unless the person typed their own).
   async pickNow(b, cx) {
+    if (this.fatal) return;
     this.target = b; this.ahead = null; cx.notify();
-    const c = await this.git(["log", "--format=%s", `origin/${b}..HEAD`]);
-    if (this.target !== b) return;
-    this.commits = c.code === 0 ? c.stdout.split("\n").filter(Boolean) : [];
-    this.ahead = this.commits.length;
-    const cur = this.title.value(), next = this.commits.length === 1 ? this.commits[0] : humanize(this.branch);
-    if (!cur.trim() || cur === this.autoTitle) { this.title.set_value(next); this.autoTitle = next; }
+    try {
+      const [c, src] = await Promise.all([this.git(["log", "--format=%s", `origin/${b}..HEAD`]), this.resolveSource(b)]);
+      if (this.target !== b) return;
+      this.source = src.name;
+      this.commits = c.code === 0 ? c.stdout.split("\n").filter(Boolean) : [];
+      this.ahead = this.commits.length;
+      const cur = this.title.value(), next = this.commits.length === 1 ? this.commits[0] : humanize(this.source);
+      if (!cur.trim() || cur === this.autoTitle) { this.title.set_value(next); this.autoTitle = next; }
+    } catch (e) { this.error = `Could not compare with ${b}: ${e.message ?? e}`; cx.notify(); }
   }
 
   generate(cx) {
-    if (this.generating || !this.target) return;
+    if (this.generating || !this.target || this.fatal) return;
     const r = this.repo, cfg = settingsFor("mr", r.key), model = cfg.model;
     this.generating = true; this.error = null; this.aiMenu = false; cx.notify();
     cx.spawn(async (cx) => {
@@ -84,17 +103,24 @@ export class CreateDialog {
 
   create(cx) {
     const r = this.repo, title = this.title.value().trim();
-    if (this.busy || !this.target || !title) { if (!title) { this.error = "Give it a title"; cx.notify(); } return; }
+    if (this.fatal || this.busy || !this.target || !title) { if (!title) { this.error = "Give it a title"; cx.notify(); } return; }
     this.error = null; this.busy = "Checking…"; cx.notify();
     const body = this.body.value();
     cx.spawn(async (cx) => {
       try {
-        const up = await this.git(["rev-parse", "--abbrev-ref", "@{u}"]);
-        let needPush = up.code !== 0;
-        if (!needPush) { const n = await this.git(["rev-list", "--count", "@{u}..HEAD"]); needPush = n.code !== 0 || Number(n.stdout.trim()) > 0; }
+        const src = await this.resolveSource(this.target), name = src.name;
+        let needPush;
+        if (src.upstream) {
+          const n = await this.git(["rev-list", "--count", `origin/${name}..HEAD`]);
+          needPush = n.code !== 0 || Number(n.stdout.trim()) > 0;
+        } else {
+          const ex = await this.git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`]);
+          if (ex.code !== 0) needPush = true;
+          else { const n = await this.git(["rev-list", "--count", `origin/${name}..HEAD`]); needPush = n.code !== 0 || Number(n.stdout.trim()) > 0; }
+        }
         if (needPush) {
           this.busy = "Pushing…"; cx.notify();
-          const p = await this.git(["push", "-u", "origin", "HEAD"]);
+          const p = await this.git(src.upstream ? ["push", "origin", `HEAD:${name}`] : ["push", "-u", "origin", `HEAD:${name}`], LONG);
           if (p.code !== 0) throw new Error(`git push failed: ${(p.stderr || p.stdout).trim()}`);
         }
         this.busy = "Creating…"; cx.notify();
@@ -103,10 +129,10 @@ export class CreateDialog {
           const token = await this.deps.gitlabToken(r.host);
           if (!token) throw new Error(`No GitLab token for ${r.host}`);
           await this.deps.gitlab(r.host, token, `/projects/${encodeURIComponent(r.path)}/merge_requests`, "POST",
-            { source_branch: this.branch, target_branch: this.target, title: this.draft ? `Draft: ${title}` : title, description: body });
+            { source_branch: name, target_branch: this.target, title: this.draft ? `Draft: ${title}` : title, description: body });
         } else {
-          const args = ["pr", "create", "--base", this.target, "--head", this.branch, "--title", title, "--body", body, ...(this.draft ? ["--draft"] : [])];
-          const x = await exec("gh", args, { cwd: r.cwd, on: r.on });
+          const args = ["pr", "create", "--base", this.target, "--head", name, "--title", title, "--body", body, ...(this.draft ? ["--draft"] : [])];
+          const x = await exec("gh", args, { cwd: r.cwd, on: r.on, ...LONG });
           if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim());
         }
         notify({ title: gl ? "Merge request created" : "Pull request created", body: title, level: "success" });
@@ -122,16 +148,17 @@ export class CreateDialog {
 
   render(t) {
     const r = this.repo, gl = r.host !== "github.com", noun = gl ? "Merge request" : "Pull request";
-    const btn = (id, label, act, primary = false) => div().id(id).h(28).px(14).flex().items_center().rounded(6).border_1().text_size(12).cursor_pointer()
+    const btn = (id, label, act, primary = false, dim = false) => div().id(id).h(28).px(14).flex().items_center().rounded(6).border_1().text_size(12).cursor_pointer().when(dim, (s) => s.opacity(0.4))
       .border_color(primary ? t.solid : t.border).bg(primary ? t.solid : t.background).text_color(primary ? t.solid_foreground : t.foreground)
       .hover((s) => s.opacity(0.9)).on_click(act).child(label);
     const label = (s) => div().text_size(10).font_semibold().text_color(t.dim).child(s);
     const field = (id, el, h = 28) => div().id(id).h(h).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).bg(t.background).cursor_text().child(el);
-    const list = this.visible();
+    const all = this.visible(), list = all.slice(0, 200), more = all.length - list.length;
+    const off = this.fatal;
     const aiOn = this.deps.installed("wb-ai");
     const mdl = modelFor("mr", r.key);
-    const menu = !this.aiMenu ? null : v_flex().id("mr-ai-list").absolute().top(46).right(20).w(280).p(4).gap(1).rounded(8)
-      .border_1().border_color(t.border).bg(t.popover).shadow_lg().on_mouse_down_out((_e, cx) => { this.aiMenu = false; cx.notify(); })
+    const menu = !this.aiMenu ? null : v_flex().id("mr-ai-list").absolute().top(30).right(0).w(280).p(4).gap(1).rounded(8)
+      .border_1().border_color(t.border).bg(t.popover).shadow_lg().on_mouse_down_out((_e, cx) => { this.aiMenu = false; this.aiClosedAt = Date.now(); cx.notify(); })
       .child(div().px(8).py(4).text_size(10).font_semibold().text_color(t.dim).child("DESCRIBE WITH"))
       .children(models().map((m) => h_flex().id(`mr-${m.id}`).h(26).px(8).gap(6).items_center().rounded(5).cursor_pointer()
         .when(mdl?.id === m.id, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
@@ -139,9 +166,9 @@ export class CreateDialog {
         .child(div().flex_1().truncate().text_size(12).child(m.name)).child(div().text_size(11).text_color(t.dim).child(describe(m)))))
       .when(aiOn, (e) => e.child(div().h(1).my(2).bg(t.border)))
       .when(aiOn, (e) => e.child(h_flex().id("mr-project").h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { this.aiMenu = false; openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "mr", project: r.key, projectName: r.name } }); cx.notify(); }).child("MR description settings…")))
+        .on_click((_e, cx) => { this.aiMenu = false; openOverlay({ mod: "wb-ai", kind: "dialog", modal: true, width: 560, props: { use: "mr", project: r.key, projectName: r.name } }); cx.notify(); }).child("MR description settings…")))
       .when(aiOn, (e) => e.child(h_flex().id("mr-models").h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { this.aiMenu = false; openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 }); cx.notify(); }).child("AI models…")));
+        .on_click((_e, cx) => { this.aiMenu = false; openOverlay({ mod: "wb-ai", kind: "dialog", modal: true, width: 580 }); cx.notify(); }).child("AI models…")));
     return v_flex().id("mr-create").size_full().min_h(0).relative().bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().h(44).flex_none().px(16).items_center().border_b(1).border_color(t.border)
         .child(div().flex_1().font_semibold().child(`Create ${noun.toLowerCase()}`))
@@ -151,7 +178,7 @@ export class CreateDialog {
       .child(v_flex().id("mr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(14).gap(12)
         .child(v_flex().gap(4).child(label("FROM"))
           .child(h_flex().h(28).px(8).gap(8).items_center().rounded(6).border_1().border_color(t.border).bg(t.raised)
-            .child(div().flex_1().truncate().child(this.branch ?? "…"))
+            .child(div().flex_1().truncate().child(this.source && this.source !== this.branch ? `${this.branch} → origin/${this.source}` : (this.branch ?? "…")))
             .when(this.ahead != null, (e) => e.child(div().text_size(11).text_color(t.dim).child(`${this.ahead} commit${this.ahead === 1 ? "" : "s"} ahead`)))))
         .child(v_flex().gap(4)
           .child(h_flex().gap(6).items_center().child(label("INTO")).when(this.fetching, (e) => e.child(div().text_size(10).text_color(t.dim).child("fetching origin…"))))
@@ -161,20 +188,28 @@ export class CreateDialog {
               .when(list.length === 0, (e) => e.child(div().p(6).text_size(12).text_color(t.dim).child(this.branches.length ? "No branch matches" : "No remote branches")))
               .children(list.map((b) => div().id(`mr-t-${b}`).h(24).px(8).flex().flex_none().items_center().rounded(4).cursor_pointer().text_size(12)
                 .when(this.target === b, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover)).truncate()
-                .on_click((_e, cx) => this.pick(b, cx)).child(b))))
+                .on_click((_e, cx) => this.pick(b, cx)).child(b)))
+              .when(more > 0, (e) => e.child(div().p(6).flex_none().text_size(11).text_color(t.dim).child(`… ${more} more, type to filter`))))
             .child(Scrollbar.vertical("mr-targets").absolute().inset_0())))
         .child(v_flex().gap(4).child(label("TITLE")).child(field("mr-title", Input.new(this.title).h_full().w_full().text_size(12).text_color(t.foreground))))
         .child(v_flex().gap(4)
           .child(h_flex().gap(8).items_center().child(label("DESCRIPTION")).child(div().flex_1())
-            .child(h_flex().id("mr-gen").h(26).flex_none().rounded(6).border_1().border_color(t.accent).overflow_hidden()
+            .child(div().relative().flex_none().child(h_flex().id("mr-gen").h(26).rounded(6).border_1().border_color(t.accent).overflow_hidden().when(off, (s) => s.opacity(0.4))
               .child(h_flex().id("mr-gen-run").h_full().px(10).gap(6).items_center().text_size(12).text_color(t.accent).cursor_pointer()
                 .hover((s) => s.bg(t.hover)).tooltip(`Describe with ${mdl?.name ?? "no model"} (${describe(mdl)})`)
-                .on_click((_e, cx) => this.generate(cx))
+                .when(!off, (s) => s.on_click((_e, cx) => this.generate(cx)))
                 .child(this.generating ? svg("mods/wb-prs/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : div().child("✦"))
                 .child(this.generating ? "Generating…" : "Generate"))
               .child(div().id("mr-gen-menu").w(22).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted)
-                .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.aiMenu = !this.aiMenu; cx.notify(); })
-                .child(svg("mods/wb-prs/icons/chevron-down.svg").size(11)))))
+                .cursor_pointer().hover((s) => s.bg(t.hover))
+                .when(!off, (s) => s.on_click((_e, cx) => {
+                  // The menu's outside-press handler already closed it on this same press: don't reopen.
+                  if (this.aiMenu) this.aiMenu = false;
+                  else if (Date.now() - this.aiClosedAt > 400) this.aiMenu = true;
+                  this.aiClosedAt = 0; cx.notify();
+                }))
+                .child(svg("mods/wb-prs/icons/chevron-down.svg").size(11))))
+              .when(Boolean(menu), (e) => e.child(menu))))
           .child(div().id("mr-desc").h(220).px(10).py(8).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
             .child(Textarea.new(this.body).w_full().h(204).text_size(12).text_color(t.foreground))))
         .child(h_flex().id("mr-draft").h(24).gap(6).items_center().cursor_pointer().on_click((_e, cx) => { this.draft = !this.draft; cx.notify(); })
@@ -185,7 +220,7 @@ export class CreateDialog {
       .child(h_flex().h(52).flex_none().px(16).gap(8).items_center().justify_end().border_t(1).border_color(t.border)
         .when(Boolean(this.busy), (e) => e.child(div().text_size(12).text_color(t.muted).child(this.busy)))
         .child(btn("mr-cancel", "Cancel", () => closeOverlay(props()?.overlay)))
-        .child(btn("mr-submit", this.busy || "Create", (_e, cx) => this.create(cx), true)))
-      .when(Boolean(menu), (e) => e.child(menu));
+        .child(btn("mr-submit", this.busy || "Create", off ? () => {} : (_e, cx) => this.create(cx), true, off)))
+      ;
   }
 }
