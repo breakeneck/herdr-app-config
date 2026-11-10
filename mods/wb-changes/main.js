@@ -2,7 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
-import { migrateAi, modelFor, runModel, describe } from "./ai.js";
+import { migrateAi, models, modelFor, setUse, runModel, describe } from "./ai.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
 function installed(name, fresh) {
@@ -272,8 +272,18 @@ export default class Changes extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(() => { closeOverlay(props()?.overlay); action(); })
       .child(svg("mods/wb-changes/icons/settings.svg").size(13).text_color(t.muted)).child(label);
-    return v_flex().p(6).gap(2).w_full().bg(t.raised).text_color(t.foreground)
-      .when(installed("wb-ai"), (e) => e.child(item("gen-settings", "AI models…", openGenSettings)))
+    // Same shape as AI review's ▾ in wb-prs: the model that writes commit messages, then settings.
+    const cur = modelFor("commit");
+    return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
+      .when(installed("wb-ai"), (e) => e
+        .child(div().px(8).py(4).text_size(10).font_semibold().text_color(t.dim).child("COMMIT WITH"))
+        .children(models().map((m) => h_flex().id(`cm-${m.id}`).h(26).px(8).gap(6).items_center().rounded(5).cursor_pointer()
+          .when(m.id === cur?.id, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click(() => { setUse("commit", m.id); closeOverlay(props()?.overlay); })
+          .child(div().flex_1().truncate().text_size(12).child(m.name)).child(div().text_size(11).text_color(t.dim).child(describe(m)))))
+        .child(div().h(1).my(2).bg(t.border))
+        .child(item("gen-settings", "AI models…", openGenSettings)))
       .when(!installed("wb-ai"), (e) => e.child(div().px(10).py(6).text_size(12).text_color(t.dim).child("Install wb-ai to pick models; using the default Claude CLI.")));
   }
 
@@ -358,7 +368,7 @@ export default class Changes extends View {
             .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit")?.name ?? "no model"} (${describe(modelFor("commit"))})`)
               .child(this.generating ? svg("mods/wb-changes/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/wb-changes/icons/layers.svg").size(12))
               .child(this.generating ? "Generating…" : "Generate"))
-            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 180, props: { menu: true } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
+            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 100, props: { menu: true } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           .child(div().id("commit").h(30).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit"))))
       .when(Boolean(ov), (e) => e.child(ov));
