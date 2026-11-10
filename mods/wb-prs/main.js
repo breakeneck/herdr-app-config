@@ -2,7 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
-import { CreateDialog } from "./create.js";
+import { CreateDialog, GEN as MR_GEN, DRAFTS as MR_DRAFTS, liveJob, patchShared, generateMr } from "./create.js";
 import { migrate, models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
 import { getSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
@@ -18,6 +18,10 @@ function installed(name, fresh) {
 
 // AI review drafts, per PR/MR url, until posted or discarded: shared "wb.ai.reviewDrafts" = { url: { text, model, at } }.
 const DRAFTS = "wb.ai.reviewDrafts";
+// A review runs in the panel copy, not the popup (an overlay's tasks are cancelled when it closes): the popup queues
+// shared "wb.ai.reviewGen" = { [pr url]: { id, state: "queued" | "running" | "error", pr, detail, at, error? } }
+// and the panel copy writes the text into DRAFTS[url] = { text, model, at, gen }.
+const REVIEW_GEN = "wb.ai.reviewGen";
 const openAiModels = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
 const openReviewSettings = (repo) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "review", project: repo.key, projectName: repo.name } });
 
@@ -114,14 +118,19 @@ export default class Prs extends View {
       this.creating.init(cx); return;
     }
     if (props()?.pr) {
-      this.detailPr = props().pr; this.reviewing = false; this.aiMenu = false; this.posting = false;
+      this.detailPr = props().pr; this.aiMenu = false; this.posting = false; this.seenGen = null; this.seenError = null;
       // The review draft: editable, kept (shared) until posted or discarded.
       this.draft = TextareaState.new({ placeholder: "AI review draft", rows: 12 });
       const saved = (shared(DRAFTS) ?? {})[this.detailPr.url];
-      if (saved) this.draft.set_value(saved.text);
+      if (saved) { this.draft.set_value(saved.text); this.seenGen = saved.gen ?? null; }
       this.draft.on("blur", () => this.keepDraft());
+      this.draft.on("change", () => this.keepDraft());
+      // The review finishes in the panel copy: its text arrives through the shared draft.
+      cx.timer.every(500, (cx) => { if (this.takeReview()) cx.notify(); });
       this.loadDetail(cx); return;
     }
+    // Long-lived jobs queued by this panel's dialogs (MR descriptions, PR reviews): run here, since a closed overlay's tasks are cancelled.
+    cx.timer.every(1000, (cx) => this.runQueued(cx));
     this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = ""; this.started = Date.now();
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
@@ -237,10 +246,63 @@ export default class Prs extends View {
 
   // ── AI review ──
   draftInfo() { return (shared(DRAFTS) ?? {})[this.detailPr.url] ?? null; }
+  get reviewing() { return liveJob((shared(REVIEW_GEN) ?? {})[this.detailPr.url]); }
   keepDraft(meta) {
-    const all = { ...(shared(DRAFTS) ?? {}) }, old = all[this.detailPr.url];
-    all[this.detailPr.url] = { ...(old ?? {}), ...(meta ?? {}), text: this.draft.value() };
-    setShared(DRAFTS, all);
+    const url = this.detailPr.url, old = (shared(DRAFTS) ?? {})[url], text = this.draft.value();
+    // A generated review this popup hasn't taken yet must not be overwritten by the stale box.
+    if (!meta && old?.gen && old.gen !== this.seenGen) return;
+    if (!meta && (old?.text ?? "") === text) return;
+    if (!meta && !old && !text.trim()) return;
+    patchShared(DRAFTS, url, { ...(old ?? {}), ...(meta ?? {}), text });
+  }
+  // The panel copy wrote a review: show it (and a failure, once).
+  takeReview() {
+    const url = this.detailPr.url, d = (shared(DRAFTS) ?? {})[url], j = (shared(REVIEW_GEN) ?? {})[url];
+    let changed = false;
+    if (d?.gen && d.gen !== this.seenGen) { this.seenGen = d.gen; this.draft.set_value(d.text ?? ""); changed = true; }
+    if (j?.state === "error" && j.id !== this.seenError) { this.seenError = j.id; this.reviewError = `AI review failed: ${j.error}`; changed = true; }
+    return changed;
+  }
+
+  // Runs queued jobs from the dialogs (see MR_GEN, REVIEW_GEN). Claimed by writing state "running" before any await.
+  runQueued(cx) {
+    for (const [id, g] of Object.entries(shared(MR_GEN) ?? {})) {
+      if (g.state !== "queued") continue;
+      patchShared(MR_GEN, id, { ...g, state: "running", at: Date.now() });
+      cx.spawn(async (cx) => {
+        try {
+          const text = await generateMr(g);
+          patchShared(MR_DRAFTS, id, { ...((shared(MR_DRAFTS) ?? {})[id] ?? { title: g.title, target: g.target, draft: false }), description: text, gen: g.id, at: Date.now() });
+          patchShared(MR_GEN, id, null);
+          notify({ title: "Description ready", body: g.branch, level: "success" });
+        } catch (e) {
+          patchShared(MR_GEN, id, { ...g, state: "error", error: String(e.message ?? e), at: Date.now() });
+          notify({ title: "Description failed", body: String(e.message ?? e), level: "error" });
+        }
+        cx.notify();
+      });
+    }
+    for (const [url, g] of Object.entries(shared(REVIEW_GEN) ?? {})) {
+      if (g.state !== "queued") continue;
+      patchShared(REVIEW_GEN, url, { ...g, state: "running", at: Date.now() });
+      cx.spawn(async (cx) => {
+        try {
+          const cfg = settingsFor("review", g.pr.repo.key), model = cfg.model, d = g.detail;
+          const diff = await this.diffText(g.pr);
+          const prompt = `${cfg.template} ${languageLine(cfg.language)}\n\nTitle: ${d.title}\n\nDescription:\n${(d.body || "(none)").slice(0, 8000)}\n\nDiff (${d.from} → ${d.to}):\n${diff.slice(0, 90000)}${diff.length > 90000 ? "\n… (diff truncated)" : ""}`;
+          // A CLI model runs inside the repo on its machine, so it can open more of the code than the diff.
+          const text = await runModel(model, prompt, { cwd: g.pr.repo.cwd, on: g.pr.repo.on });
+          if (!text) throw new Error("the model returned nothing");
+          patchShared(DRAFTS, url, { ...((shared(DRAFTS) ?? {})[url] ?? {}), text, model: model?.name, at: new Date().toISOString(), gen: g.id });
+          patchShared(REVIEW_GEN, url, null);
+          notify({ title: "AI review ready", body: g.pr.title, level: "success" });
+        } catch (e) {
+          patchShared(REVIEW_GEN, url, { ...g, state: "error", error: String(e.message ?? e), at: Date.now() });
+          notify({ title: "AI review failed", body: String(e.message ?? e), level: "error" });
+        }
+        cx.notify();
+      });
+    }
   }
   dropDraft() {
     const all = { ...(shared(DRAFTS) ?? {}) };
@@ -249,8 +311,8 @@ export default class Prs extends View {
   }
 
   // The PR/MR as one unified diff (capped: a model's prompt has room for so much).
-  async diffText() {
-    const pr = this.detailPr, r = pr.repo;
+  async diffText(pr = this.detailPr) {
+    const r = pr.repo;
     if (pr.provider === "gitlab") {
       const token = await gitlabToken(r.host), base = `/projects/${encodeURIComponent(r.path)}/merge_requests/${pr.number}`;
       const files = await gitlab(r.host, token, `${base}/diffs?per_page=100`).catch(async () => (await gitlab(r.host, token, `${base}/changes`)).changes ?? []);
@@ -261,22 +323,13 @@ export default class Prs extends View {
     return x.stdout;
   }
 
+  // Queues the review for the panel copy and returns: the text lands in the draft even if this popup is closed.
   aiReview(cx) {
     if (this.reviewing || !this.detail) return;
-    const pr = this.detailPr, d = this.detail, cfg = settingsFor("review", pr.repo.key), model = cfg.model;
-    this.reviewing = true; this.reviewError = null; this.aiMenu = false; cx.notify();
-    cx.spawn(async (cx) => {
-      try {
-        const diff = await this.diffText();
-        const prompt = `${cfg.template} ${languageLine(cfg.language)}\n\nTitle: ${d.title}\n\nDescription:\n${(d.body || "(none)").slice(0, 8000)}\n\nDiff (${d.from} → ${d.to}):\n${diff.slice(0, 90000)}${diff.length > 90000 ? "\n… (diff truncated)" : ""}`;
-        // A CLI model runs inside the repo on its machine, so it can open more of the code than the diff.
-        const text = await runModel(model, prompt, { cwd: pr.repo.cwd, on: pr.repo.on });
-        if (!text) throw new Error("the model returned nothing");
-        this.draft.set_value(text);
-        this.keepDraft({ model: model?.name, at: new Date().toISOString() });
-      } catch (e) { this.reviewError = `AI review failed: ${e.message ?? e}`; }
-      finally { this.reviewing = false; cx.notify(); }
-    });
+    const pr = this.detailPr, d = this.detail;
+    this.reviewError = null; this.aiMenu = false;
+    patchShared(REVIEW_GEN, pr.url, { id: `${Date.now()}`, state: "queued", pr, detail: { title: d.title, body: (d.body ?? "").slice(0, 8000), from: d.from, to: d.to }, at: Date.now() });
+    cx.notify();
   }
 
   // The draft, as it is now (edited or not), becomes a comment on the PR/MR.

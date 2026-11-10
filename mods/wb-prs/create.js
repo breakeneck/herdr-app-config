@@ -2,12 +2,41 @@
 // remote branches), title, description with AI Generate, Draft, Create. Opened by main.js with props { create: { repo } }.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { exec, notify, props, openOverlay, closeOverlay, setShared } from "herdr";
+import { exec, notify, props, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
 
 const LONG = { timeout: 600000 };
 const BASES = ["main", "master", "develop", "production"];
 const humanize = (b) => b.replace(/^[^/]+\//, "").replace(/[-_]+/g, " ").trim() || b;
+
+// Drafts and generations outlive the dialog (an overlay's tasks are cancelled when it closes, AGENTS.md "Cleanup"):
+//   shared "wb.mr.drafts" = { [`${repo.key}|${branch}`]: { title, description, target, draft, at, gen? } }
+//   shared "wb.mr.gen"    = { [same key]: { id, state: "queued" | "running" | "error", repo, branch, target, title, at, error? } }
+// The dialog only queues a request; the wb-prs panel copy (alive while its block is in the layout) runs it
+// (runMrGeneration, from its timer) and writes the text into the draft, so closing the dialog loses nothing.
+export const DRAFTS = "wb.mr.drafts", GEN = "wb.mr.gen";
+const BOOT = Date.now(); // a job started before this module loaded belonged to code that no longer runs
+export const liveJob = (g) => Boolean(g) && (g.state === "queued" || g.state === "running") && g.at >= BOOT && Date.now() - g.at < 660000;
+export function patchShared(key, id, value) {
+  const all = { ...(shared(key) ?? {}) };
+  if (value == null) delete all[id]; else all[id] = value;
+  setShared(key, all);
+}
+
+// Runs the AI description for a queued request; returns the text. Pure of dialog state: used by the panel copy.
+export async function generateMr(req) {
+  const r = req.repo, cfg = settingsFor("mr", r.key), model = cfg.model;
+  const git = (args) => exec("git", args, { cwd: r.cwd, on: r.on });
+  const base = `origin/${req.target}`;
+  const log = await git(["log", "--format=%s%n%b", `${base}..HEAD`]);
+  const diff = await git(["diff", `${base}...HEAD`]);
+  if (diff.code !== 0) throw new Error((diff.stderr || diff.stdout).trim());
+  const d = diff.stdout;
+  const prompt = `${cfg.template} ${languageLine(cfg.language)}\n\nTitle: ${req.title}\n\nCommits:\n${log.stdout.slice(0, 8000)}\n\nDiff (${req.target} ← ${req.branch}):\n${d.slice(0, 90000)}${d.length > 90000 ? "\n… (diff truncated)" : ""}`;
+  const text = await runModel(model, prompt, { cwd: r.cwd, on: r.on });
+  if (!text) throw new Error("the model returned nothing");
+  return text;
+}
 
 export class CreateDialog {
   // deps: { gitlab, gitlabToken, installed } from main.js
@@ -17,7 +46,7 @@ export class CreateDialog {
 
   init(cx) {
     this.branches = []; this.target = null; this.branch = null; this.ahead = null; this.commits = [];
-    this.fetching = true; this.error = null; this.busy = ""; this.generating = false; this.aiMenu = false; this.draft = false;
+    this.fetching = true; this.error = null; this.busy = ""; this.restored = false; this.seenGen = null; this.wantTarget = null; this.aiMenu = false; this.draft = false;
     this.autoTitle = ""; this.fatal = false; this.def = null; this.aiClosedAt = 0;
     this.search = InputState.new({ placeholder: "Search branches…" });
     this.search.on("change", (_e, cx) => { this.filter = this.search.value(); cx.notify(); });
@@ -25,11 +54,16 @@ export class CreateDialog {
     this.filter = "";
     this.title = InputState.new({ placeholder: "Title" });
     this.body = TextareaState.new({ placeholder: "Description", rows: 10 });
+    this.title.on("change", () => this.save());
+    this.body.on("change", () => this.save());
+    // A generation finishes in the panel copy: its text arrives through the shared draft.
+    cx.timer.every(500, (cx) => { if (this.takeGenerated()) cx.notify(); });
     cx.spawn(async (cx) => {
       try {
         const h = await this.git(["rev-parse", "--abbrev-ref", "HEAD"]);
         this.branch = h.stdout.trim();
         if (h.code !== 0 || this.branch === "HEAD") { this.fatal = true; throw new Error("No branch is checked out (detached HEAD)"); }
+        this.restore();
         await this.loadBranches(cx);
       } catch (e) { this.error = String(e.message ?? e); }
       cx.notify();
@@ -47,13 +81,48 @@ export class CreateDialog {
     const def = d.code === 0 ? d.stdout.trim().replace(/^origin\//, "") : null;
     this.def = def;
     if (keep && this.target && this.branches.includes(this.target)) { await this.pickNow(this.target, cx); return; }
-    const t = [def, "main", "master", "develop"].find((b) => b && this.branches.includes(b)) ?? this.branches[0] ?? null;
+    const t = [this.wantTarget, def, "main", "master", "develop"].find((b) => b && this.branches.includes(b)) ?? this.branches[0] ?? null;
     if (t) await this.pickNow(t, cx); else cx.notify();
+  }
+
+  // ── drafts: one per repo and source branch, kept until the request is created ──
+  dk() { return this.branch ? `${this.repo.key}|${this.branch}` : null; }
+  stored() { const k = this.dk(); return k ? (shared(DRAFTS) ?? {})[k] ?? null : null; }
+  job() { const k = this.dk(); return k ? (shared(GEN) ?? {})[k] ?? null : null; }
+  isGenerating() { return liveJob(this.job()); }
+  restore() {
+    const d = this.stored();
+    if (d) {
+      // A restored title is not an auto title: pickNow leaves it alone.
+      if (d.title) this.title.set_value(d.title);
+      if (d.description) this.body.set_value(d.description);
+      this.draft = Boolean(d.draft); this.wantTarget = d.target ?? null; this.seenGen = d.gen ?? null;
+    }
+    this.restored = true;
+  }
+  save() {
+    const k = this.dk();
+    if (!k || !this.restored) return;
+    const old = this.stored();
+    // A generated description the dialog hasn't taken yet must not be overwritten by the stale box.
+    const description = old?.gen && old.gen !== this.seenGen ? old.description : this.body.value();
+    const title = this.title.value(), next = { title: title === this.autoTitle ? "" : title, description, target: this.target, draft: this.draft };
+    if (!next.title.trim() && !next.description.trim() && !old) return;
+    if (old && ["title", "description", "target", "draft"].every((f) => old[f] === next[f])) return;
+    patchShared(DRAFTS, k, { ...(old ?? {}), ...next, at: Date.now() });
+  }
+  // The panel copy wrote a generated description: show it (and a failure, once).
+  takeGenerated() {
+    const d = this.stored(), j = this.job();
+    let changed = false;
+    if (d?.gen && d.gen !== this.seenGen) { this.seenGen = d.gen; this.body.set_value(d.description ?? ""); changed = true; }
+    if (j?.state === "error" && j.id !== this.seenError) { this.seenError = j.id; this.error = `Generating failed: ${j.error}`; changed = true; }
+    return changed;
   }
 
   visible() { const f = (this.filter ?? "").toLowerCase(); return this.branches.filter((b) => b.toLowerCase().includes(f)); }
 
-  pick(b, cx) { if (this.fatal) return; cx.spawn(async (cx) => { await this.pickNow(b, cx); cx.notify(); }); }
+  pick(b, cx) { if (this.fatal) return; this.target = b; this.save(); cx.spawn(async (cx) => { await this.pickNow(b, cx); cx.notify(); }); }
 
   // The branch the MR comes from: the upstream's name when the local branch tracks a differently named, non-base
   // remote branch (review/1128 → origin/oleh/1128-…), else the local name.
@@ -81,24 +150,14 @@ export class CreateDialog {
     } catch (e) { this.error = `Could not compare with ${b}: ${e.message ?? e}`; cx.notify(); }
   }
 
+  // Queues the job for the wb-prs panel copy and returns: the result is written into the draft even if this dialog is closed.
   generate(cx) {
-    if (this.generating || !this.target || this.fatal) return;
-    const r = this.repo, cfg = settingsFor("mr", r.key), model = cfg.model;
-    this.generating = true; this.error = null; this.aiMenu = false; cx.notify();
-    cx.spawn(async (cx) => {
-      try {
-        const base = `origin/${this.target}`;
-        const log = await this.git(["log", "--format=%s%n%b", `${base}..HEAD`]);
-        const diff = await this.git(["diff", `${base}...HEAD`]);
-        if (diff.code !== 0) throw new Error((diff.stderr || diff.stdout).trim());
-        const d = diff.stdout;
-        const prompt = `${cfg.template} ${languageLine(cfg.language)}\n\nTitle: ${this.title.value()}\n\nCommits:\n${log.stdout.slice(0, 8000)}\n\nDiff (${this.target} ← ${this.branch}):\n${d.slice(0, 90000)}${d.length > 90000 ? "\n… (diff truncated)" : ""}`;
-        const text = await runModel(model, prompt, { cwd: r.cwd, on: r.on });
-        if (!text) throw new Error("the model returned nothing");
-        this.body.set_value(text);
-      } catch (e) { this.error = `Generating failed: ${e.message ?? e}`; }
-      finally { this.generating = false; cx.notify(); }
-    });
+    const k = this.dk();
+    if (!k || this.isGenerating() || !this.target || this.fatal) return;
+    this.error = null; this.aiMenu = false;
+    this.save();
+    patchShared(GEN, k, { id: `${Date.now()}`, state: "queued", repo: this.repo, branch: this.branch, target: this.target, title: this.title.value(), at: Date.now() });
+    cx.notify();
   }
 
   create(cx) {
@@ -137,6 +196,8 @@ export class CreateDialog {
         }
         notify({ title: gl ? "Merge request created" : "Pull request created", body: title, level: "success" });
         setShared("wb.prs.changed", { repo: r, ts: Date.now() });
+        const k = this.dk();
+        if (k) { patchShared(DRAFTS, k, null); if (liveJob(this.job())) patchShared(GEN, k, null); }
         closeOverlay(props()?.overlay);
         return;
       } catch (e) {
@@ -154,7 +215,7 @@ export class CreateDialog {
     const label = (s) => div().text_size(10).font_semibold().text_color(t.dim).child(s);
     const field = (id, el, h = 28) => div().id(id).h(h).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).bg(t.background).cursor_text().child(el);
     const all = this.visible(), list = all.slice(0, 200), more = all.length - list.length;
-    const off = this.fatal;
+    const off = this.fatal, generating = this.isGenerating();
     const aiOn = this.deps.installed("wb-ai");
     const mdl = modelFor("mr", r.key);
     const menu = !this.aiMenu ? null : v_flex().id("mr-ai-list").absolute().top(30).right(0).w(280).p(4).gap(1).rounded(8)
@@ -198,8 +259,8 @@ export class CreateDialog {
               .child(h_flex().id("mr-gen-run").h_full().px(10).gap(6).items_center().text_size(12).text_color(t.accent).cursor_pointer()
                 .hover((s) => s.bg(t.hover)).tooltip(`Describe with ${mdl?.name ?? "no model"} (${describe(mdl)})`)
                 .when(!off, (s) => s.on_click((_e, cx) => this.generate(cx)))
-                .child(this.generating ? svg("mods/wb-prs/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : div().child("✦"))
-                .child(this.generating ? "Generating…" : "Generate"))
+                .child(generating ? svg("mods/wb-prs/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : div().child("✦"))
+                .child(generating ? "Generating…" : "Generate"))
               .child(div().id("mr-gen-menu").w(22).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted)
                 .cursor_pointer().hover((s) => s.bg(t.hover))
                 .when(!off, (s) => s.on_click((_e, cx) => {
@@ -212,7 +273,7 @@ export class CreateDialog {
               .when(Boolean(menu), (e) => e.child(menu))))
           .child(div().id("mr-desc").h(220).px(10).py(8).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
             .child(Textarea.new(this.body).w_full().h(204).text_size(12).text_color(t.foreground))))
-        .child(h_flex().id("mr-draft").h(24).gap(6).items_center().cursor_pointer().on_click((_e, cx) => { this.draft = !this.draft; cx.notify(); })
+        .child(h_flex().id("mr-draft").h(24).gap(6).items_center().cursor_pointer().on_click((_e, cx) => { this.draft = !this.draft; this.save(); cx.notify(); })
           .child(div().size(14).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
             .border_color(this.draft ? t.accent : t.border).bg(this.draft ? t.accent : t.background).text_color(t.accent_foreground).child(this.draft ? "✓" : ""))
           .child(div().text_size(12).child("Draft")))

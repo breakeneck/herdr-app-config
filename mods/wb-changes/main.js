@@ -25,6 +25,26 @@ const key = () => JSON.stringify(location());
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 
+// Commit message drafts survive switching windows, spaces and folders: shared "wb.commit.drafts" = { [repoId]: { text, at } },
+// repoId = "<machine|local>:<git toplevel>". A running generation is shared "wb.commit.generating" = { [repoId]: startedAt },
+// so every copy (and a return to that repo) shows it; its result always lands in that repo's draft.
+const DRAFTS = "wb.commit.drafts", GENERATING = "wb.commit.generating";
+const BOOT = Date.now(); // module load: a flag started before it belongs to code that no longer runs (hot reload, restart)
+const repoIdOf = (on, root) => `${on ?? "local"}:${root}`;
+const running = (id) => { const at = id && (shared(GENERATING) ?? {})[id]; return Boolean(at) && at >= BOOT && Date.now() - at < 660000; };
+const setGenerating = (id, on) => {
+  const all = { ...(shared(GENERATING) ?? {}) };
+  if (on) all[id] = Date.now(); else delete all[id];
+  setShared(GENERATING, all);
+};
+const storeDraft = (id, text) => {
+  const all = { ...(shared(DRAFTS) ?? {}) };
+  if (!String(text ?? "").trim()) { if (!(id in all)) return; delete all[id]; }
+  else if (all[id]?.text === text) return;
+  else all[id] = { text, at: Date.now() };
+  setShared(DRAFTS, all);
+};
+
 const ITEM = 22, INDENT = 10; // ITEM: changed-file list row, INDENT: per tree level
 const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
 // Per-project generation settings (model, language, template) live in shared("wb.ai.project"), edited in the wb-ai window.
@@ -37,7 +57,7 @@ export default class Changes extends View {
     migrate();
     this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
     try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("scope") === "base") this.scope = "base"; } catch {}
-    this.message = ""; this.handle = cx.focus_handle(); this.generating = false;
+    this.message = ""; this.handle = cx.focus_handle(); this.repoId = null; this.lastSet = null; this.draftTimer = null; this.pending = new Map();
     this.input = TextareaState.new({ placeholder: "Commit message" });
     // The box height (px) is a splitter choice: drag the handle above it up to grow it, remembered per person.
     // The textarea is sized by this height, not by rows (a Textarea's layout height is its element's).
@@ -48,12 +68,24 @@ export default class Changes extends View {
       const hadMessage = Boolean(this.message.trim());
       this.message = this.input.value();
       if (hadMessage !== Boolean(this.message.trim())) cx.notify();
+      // Programmatic values (a loaded or generated draft) are already stored; an edit is saved shortly after the last key.
+      if (this.message === this.lastSet) return;
+      this.lastSet = null;
+      this.draftTimer?.cancel?.();
+      this.draftTimer = cx.timer.after(300, () => this.saveDraft());
     });
     this.input.on("submit", (e, cx) => { if (!e.modifiers?.shift) this.commit(cx); });
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
-    this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    this.input.on("blur", (_e, cx) => { this.typing = false; this.saveDraft(); cx.notify(); });
     this.refresh(cx);
     cx.timer.every(10000, (cx) => this.refresh(cx));
+  }
+
+  // The textarea's text, set from code (not typed).
+  setText(text) { this.lastSet = text; this.input.set_value(text); this.message = text; }
+  saveDraft() {
+    this.draftTimer?.cancel?.(); this.draftTimer = null;
+    if (this.repoId) storeDraft(this.repoId, this.message);
   }
 
   watch(root, gitDir, cx) {
@@ -75,8 +107,9 @@ export default class Changes extends View {
     if (this.loading || this.busy) return;
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
+      this.saveDraft(); this.repoId = null;
       this.context = context; this.collapsed = new Set(); this.root = null; this.files = []; this.open = null;
-      this.pk = null; this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
+      this.pk = null; this.setText(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
     }
     if (!cwd) return;
     this.loading = true;
@@ -130,6 +163,15 @@ export default class Changes extends View {
         }
         if (stale()) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
+        const id = repoIdOf(on, root);
+        if (this.repoId !== id) {
+          this.repoId = id;
+          // The repo's draft comes back; text typed before the repo was known (and no draft yet) is kept and stored.
+          const saved = (shared(DRAFTS) ?? {})[id]?.text ?? "";
+          if (saved || !this.message.trim()) this.setText(saved); else this.saveDraft();
+          const failed = this.pending.get(id);
+          if (failed) { this.note = failed; this.pending.delete(id); }
+        }
         this.watch(root, gitDir, cx);
         // The project (repo) key for per-project AI settings; cached in ai.js after the first lookup.
         const pk = await projectKey({ cwd: root, on });
@@ -240,9 +282,10 @@ export default class Changes extends View {
   // Ask the configured model for a commit message from the current diff, and drop it into the textarea.
   // Claude rides the person's subscription and starts inside the repo folder; local goes to the endpoint.
   generate(cx) {
-    if (!this.root || this.generating || this.busy || this.loading || this.context !== key()) return;
-    const root = this.root, on = this.on, context = this.context, hasHead = this.hasHead, against = this.against;
-    this.generating = true; this.note = null; cx.notify();
+    if (!this.root || running(this.repoId) || this.busy || this.loading || this.context !== key()) return;
+    const root = this.root, on = this.on, id = this.repoId, hasHead = this.hasHead, against = this.against;
+    this.note = null;
+    setGenerating(id, true);
     cx.spawn(async (cx) => {
       try {
         const cfg = settingsFor("commit", await projectKey({ cwd: root, on })), model = cfg.model;
@@ -259,9 +302,16 @@ export default class Changes extends View {
         let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on });
         if (cfg.noBlank !== false) msg = msg.split("\n").filter((l) => l.trim()).join("\n");
         if (!msg) throw new Error("the model returned nothing");
-        if (key() === context) { this.input.set_value(msg); this.message = msg; }
-      } catch (e) { if (key() === context) this.note = `Generate failed: ${e}`; }
-      finally { this.generating = false; cx.notify(); }
+        // Always kept in that repo's draft; also in the box when that repo is the one shown now.
+        storeDraft(id, msg);
+        if (this.repoId === id) this.setText(msg);
+        else notify({ title: "Commit message ready", body: id.replace(/^[^:]*:/, "").split("/").pop(), level: "success" });
+      } catch (e) {
+        const failed = `Generate failed: ${e}`;
+        if (this.repoId === id) this.note = failed;
+        else { this.pending.set(id, failed); notify({ title: "Commit message failed", body: String(e.message ?? e), level: "error" }); }
+      }
+      finally { setGenerating(id, false); cx.notify(); }
     });
   }
 
@@ -291,7 +341,7 @@ export default class Changes extends View {
 
   commit(cx) {
     if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== key()) return;
-    const root = this.root, on = this.on, context = this.context, message = this.message.trim();
+    const root = this.root, on = this.on, context = this.context, message = this.message.trim(), id = this.repoId;
     this.busy = true; this.note = null;
     cx.spawn(async (cx) => {
       try {
@@ -299,7 +349,8 @@ export default class Changes extends View {
           const r = await exec("git", args, { cwd: root, on });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         }
-        if (key() === context) { this.message = ""; this.input.set_value(""); }
+        storeDraft(id, "");
+        if (key() === context) this.setText("");
       } catch (e) { if (key() === context) this.note = `Commit failed: ${e}`; }
       finally { this.busy = false; this.refresh(cx); cx.notify(); }
     });
@@ -318,7 +369,8 @@ export default class Changes extends View {
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree";
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
-    const genEnabled = Boolean(this.root && !this.generating && !this.busy && !this.loading && this.context === key());
+    const generating = running(this.repoId);
+    const genEnabled = Boolean(this.root && !generating && !this.busy && !this.loading && this.context === key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     const sec = S.sectionOf("wb-changes"), ov = S.overlay(sec);
     return v_flex().id("changes").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
@@ -367,9 +419,9 @@ export default class Changes extends View {
         .child(div().id("commit-message").w_full().h(this.commitH).flex_none().overflow_hidden().px(10).py(6).rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.input).w_full().h(this.commitH - 14).text_size(12).text_color(t.foreground)))
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
-            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
-              .child(this.generating ? svg("mods/wb-changes/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/wb-changes/icons/layers.svg").size(12))
-              .child(this.generating ? "Generating…" : "Generate"))
+            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
+              .child(generating ? svg("mods/wb-changes/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/wb-changes/icons/layers.svg").size(12))
+              .child(generating ? "Generating…" : "Generate"))
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 130, props: { menu: true, project: this.pk } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           .child(div().id("commit").h(30).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit"))))
