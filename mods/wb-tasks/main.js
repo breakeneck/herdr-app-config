@@ -423,6 +423,7 @@ export default class Jira extends View {
         .when(Boolean(f.status), (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(tone).text_size(11).text_color(tone).child(f.status.name)))
         .child(div().flex_1())
         .child(btn("open-jira", "Open in Jira", () => exec("open", [url])))
+        .child(btn("copy-link", "Copy link", (_e, cx) => cx.write_to_clipboard(url)))
         .child(btn("copy-key", `Copy ${key}`, (_e, cx) => cx.write_to_clipboard(key)))
         .child(div().id("close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(close).child("✕")))
