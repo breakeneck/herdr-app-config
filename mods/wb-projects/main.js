@@ -7,6 +7,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, run, exec, hc, theme, appHome, readTextFile, writeTextFile, notify, shared, openOverlay } from "herdr";
 import * as S from "./section.js";
+import { colorOf } from "./colors.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
 function installed(name, fresh) {
@@ -20,17 +21,11 @@ function installed(name, fresh) {
 
 const FILE = () => `${appHome()}/remote-projects.json`;
 const ICON = (n) => `mods/wb-projects/${n}.svg`;
-const TILES = ["#22a99a", "#5b6cf0", "#8a9a4a", "#9b5de5", "#c2508f", "#b8860b", "#5b8def", "#2a9cae", "#d9649a", "#3fae6a"];
 
 const base = (p) => p.replace(/\/+$/, "").split("/").pop();
 const initials = (name) => {
   const parts = name.split(/[-_ .]+/).filter(Boolean);
   return (parts.length > 1 ? parts[0][0] + parts[1][0] : parts[0]?.[0] ?? "?").toUpperCase();
-};
-const tile = (name) => {
-  let h = 0;
-  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return TILES[h % TILES.length];
 };
 
 export default class RemoteProjects extends View {
@@ -175,7 +170,7 @@ export default class RemoteProjects extends View {
       .hover((s) => s.bg(t.hover))
       .on_hover((h, cx) => { this.over = h ? id : this.over === id ? null : this.over; cx.notify(); })
       .on_click(() => this.open(p))
-      .child(div().relative().flex_none().size(30).rounded(7).bg(tile(p.name))
+      .child(div().relative().flex_none().size(30).rounded(7).bg(colorOf(p.name))
         .flex().items_center().justify_center().text_size(12).font_bold().text_color("#ffffff")
         .child(initials(p.name))
         .when(open, (el) => el.child(div().absolute().right(-3).bottom(-3).size(10).rounded(5)

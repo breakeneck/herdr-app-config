@@ -3,9 +3,8 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, shared } from "herdr";
 import * as S from "./section.js";
+import { colorOf } from "./colors.js";
 
-// The Spaces list's tile colors (wb-spaces MARK): palette name → hex.
-const SPACE_MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -172,8 +171,8 @@ export default class Files extends View {
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme(), sec = S.sectionOf("wb-files"), ov = S.overlay(sec);
     // The header wears the active project's color (its tile in the Spaces list), so the project shows at a glance.
-    const sp = spaces().find((s) => s.active), mark = sp ? (shared("space.colors") ?? {})[sp.id] : null;
-    const fill = mark ? (mark.startsWith("#") ? mark : (SPACE_MARK[mark] ?? t[mark])) : null;
+    const sp = spaces().find((s) => s.active);
+    const fill = sp && sp.name !== "~" ? colorOf(sp.name) : null;
     return v_flex().id("files").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(S.header(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
           .when(Boolean(fill), el => el.bg(fill).text_color("#ffffff")), sec, 44)

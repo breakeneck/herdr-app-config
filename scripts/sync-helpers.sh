@@ -3,6 +3,7 @@
 #   section.js  canonical: mods/wb-spaces/section.js  (before the rename: mods/spaces-copy/)
 #   ai.js       canonical: mods/wb-ai/ai.js           (before the rename: mods/commit-gen/)
 #   secrets.js  canonical: mods/wb-tasks/secrets.js   (tokens: macOS Keychain)
+#   colors.js   canonical: mods/wb-spaces/colors.js   (project colors, shared "wb.colors")
 # Targets are discovered: every other mods/*/ folder that already contains the helper.
 # Mods without the helper (Herdr's built-ins) are never touched.
 #
@@ -55,6 +56,7 @@ sync_file() {
 sync_file section.js wb-spaces spaces-copy
 sync_file ai.js wb-ai commit-gen
 sync_file secrets.js wb-tasks
+sync_file colors.js wb-spaces
 
 if [ "$differ" = 1 ]; then
   echo "Out of sync. Run: scripts/sync-helpers.sh --write" >&2
