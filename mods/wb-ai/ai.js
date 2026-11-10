@@ -77,15 +77,23 @@ const split = (s) => String(s || "").split(/\s+/).filter(Boolean);
 const clean = (text) => String(text ?? "").replace(/^```[^\n]*\n/, "").replace(/\n?```\s*$/, "").trim();
 
 // Runs a model on a prompt and returns its answer. `cwd` / `on`: where a CLI runs (the repo).
-// exec, but a CLI missing on that machine says so plainly instead of "herdr.exec: cannot start …".
+// Starts `cmd` through the person's interactive shell, so shell functions, aliases and PATH set up
+// in ~/.bashrc (nvm, a `claude` function picking an account per folder) work as in a terminal.
+// sh -c: $0 = cmd, $@ = args; the shell gets them as its own $0 / $@ (fish: $argv), unquoted nowhere.
+const VIA_SHELL = `case "\${SHELL##*/}" in fish) exec "$SHELL" -ic '$argv' "$0" "$@" ;; *) exec "\${SHELL:-/bin/sh}" -ic '"$0" "$@"' "$0" "$@" ;; esac`;
+
+// exec; a CLI that doesn't start on its own (only a shell function, or on the shell's PATH) is
+// retried through the interactive shell; one missing there too says so plainly.
 async function run(cmd, args, { cwd, on }) {
+  const missing = () => new Error(`\`${cmd}\` isn't installed on ${on ? `machine "${on}"` : "this computer"} (not even in its interactive shell): install it there, or set its full path in AI models settings`);
   try { return await exec(cmd, args, { cwd, on, timeout: 600000 }); }
   catch (e) {
-    const msg = String(e?.message ?? e);
-    if (/cannot start|No such file|not found/i.test(msg))
-      throw new Error(`\`${cmd}\` isn't installed on ${on ? `machine "${on}"` : "this computer"} (not on its PATH): install it there, or set its full path in AI models settings`);
-    throw e;
+    if (!/cannot start|No such file|not found/i.test(String(e?.message ?? e))) throw e;
   }
+  const r = await exec("sh", ["-c", VIA_SHELL, cmd, ...args], { cwd, on, timeout: 600000 });
+  if (r.code === 127) throw missing();
+  // An interactive shell without a terminal says so on stderr first; that's not the CLI's error.
+  return { ...r, stderr: String(r.stderr ?? "").split("\n").filter((l) => !/^\S+: (cannot set terminal process group|no job control in this shell)/.test(l)).join("\n") };
 }
 
 export async function runModel(m, prompt, { cwd, on } = {}) {
