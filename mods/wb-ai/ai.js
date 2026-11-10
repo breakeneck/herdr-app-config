@@ -24,6 +24,7 @@ export const DEFAULTS = {
 };
 export const LANGUAGES = ["English", "Ukrainian", "Polish", "German", "Spanish", "French"];
 export const languageLine = (lang) => `Write it in ${lang || "English"}.`;
+export const NO_TRAILERS = "Do not add any trailers (no Co-Authored-By, no Generated-with lines).";
 export const PROVIDERS = {
   claude: { label: "Claude", command: "claude", args: "-p", hint: "The claude CLI on the repo's machine, on your subscription." },
   codex: { label: "Codex", command: "codex", args: "exec", hint: "The codex CLI on the repo's machine (codex login: your ChatGPT subscription), read-only sandbox." },
@@ -142,7 +143,10 @@ export async function localModels(url) {
 }
 
 const split = (s) => String(s || "").split(/\s+/).filter(Boolean);
-const clean = (text) => String(text ?? "").replace(/^```[^\n]*\n/, "").replace(/\n?```\s*$/, "").trim();
+// Model output without code fences and without the trailers the claude CLI likes to append
+// (Co-Authored-By, "Generated with Claude Code", a leading robot emoji, Signed-off-by lines naming an AI).
+const NOISE = [/^\s*co-authored-by:/i, /generated with \[?claude code/i, /^\s*🤖/, /^\s*signed-off-by:.*(claude|anthropic|codex|openai|gpt|copilot|\bai\b)/i];
+const clean = (text) => String(text ?? "").replace(/^```[^\n]*\n/, "").replace(/\n?```\s*$/, "").split("\n").filter((l) => !NOISE.some((re) => re.test(l))).join("\n").replace(/\s+$/, "").trim();
 
 // Runs a model on a prompt and returns its answer. `cwd` / `on`: where a CLI runs (the repo).
 // Starts `cmd` through the person's interactive shell, so shell functions, aliases and PATH set up

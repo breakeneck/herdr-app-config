@@ -2,7 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
-import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
+import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, NO_TRAILERS, runModel, describe } from "./ai.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
 function installed(name, fresh) {
@@ -298,7 +298,7 @@ export default class Changes extends View {
         let text = `Git status:\n${st.stdout}\n\nDiff:\n${(df.stdout || "").slice(0, 60000)}`;
         if (fresh.length) text += `\n\nNew untracked files (contents not shown): ${fresh.join(", ")}`;
         // The project's template (wb-ai settings) says how the message looks; blank lines are dropped unless allowed.
-        const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template}${cfg.noBlank !== false ? " No blank lines anywhere." : ""} Reply with the message only — no quotes, no code fences, no explanations. ${languageLine(cfg.language)}`;
+        const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template}${cfg.noBlank !== false ? " No blank lines anywhere." : ""} Reply with the message only — no quotes, no code fences, no explanations. ${NO_TRAILERS} ${languageLine(cfg.language)}`;
         let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on });
         if (cfg.noBlank !== false) msg = msg.split("\n").filter((l) => l.trim()).join("\n");
         if (!msg) throw new Error("the model returned nothing");

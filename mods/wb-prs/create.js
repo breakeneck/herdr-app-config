@@ -3,7 +3,7 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { exec, notify, props, openOverlay, closeOverlay, setShared, shared } from "herdr";
-import { models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
+import { models, modelFor, settingsFor, setUse, languageLine, NO_TRAILERS, runModel, describe } from "./ai.js";
 
 const LONG = { timeout: 600000 };
 const BASES = ["main", "master", "develop", "production"];
@@ -32,7 +32,7 @@ export async function generateMr(req) {
   const diff = await git(["diff", `${base}...HEAD`]);
   if (diff.code !== 0) throw new Error((diff.stderr || diff.stdout).trim());
   const d = diff.stdout;
-  const prompt = `${cfg.template} ${languageLine(cfg.language)}\n\nTitle: ${req.title}\n\nCommits:\n${log.stdout.slice(0, 8000)}\n\nDiff (${req.target} ← ${req.branch}):\n${d.slice(0, 90000)}${d.length > 90000 ? "\n… (diff truncated)" : ""}`;
+  const prompt = `${cfg.template} ${NO_TRAILERS} ${languageLine(cfg.language)}\n\nTitle: ${req.title}\n\nCommits:\n${log.stdout.slice(0, 8000)}\n\nDiff (${req.target} ← ${req.branch}):\n${d.slice(0, 90000)}${d.length > 90000 ? "\n… (diff truncated)" : ""}`;
   const text = await runModel(model, prompt, { cwd: r.cwd, on: r.on });
   if (!text) throw new Error("the model returned nothing");
   return text;
