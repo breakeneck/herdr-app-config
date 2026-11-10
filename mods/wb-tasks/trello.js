@@ -12,6 +12,20 @@ import { getSecret, findSecret, setSecret, supported as secretsSupported, UNSUPP
 
 const SERVICE = "herdr-trello";
 const API = "https://api.trello.com/1";
+
+// Trello has no estimate of its own: a board's Custom Field named like one is it.
+const ESTIMATE = /estimat|story ?points?|^sp$|^points?$|оцінк|естімейт/i;
+const estimateField = (fields) => (fields ?? []).find((f) => ESTIMATE.test(f.name ?? "")) ?? null;
+// A card's value of that field ("3", "2h", a list option), or null.
+function estimateOf(items, field) {
+  const it = field && (items ?? []).find((i) => i.idCustomField === field.id);
+  if (!it) return null;
+  if (it.idValue) return field.options?.find((o) => o.id === it.idValue)?.value?.text ?? null;
+  const v = it.value?.number ?? it.value?.text;
+  return v == null || v === "" ? null : String(v);
+}
+const estimatePill = (text, t) => div().flex_none().px(5).rounded(4).border_1().border_color(t.border)
+  .text_size(10).text_color(t.muted).child(text);
 const STALE = 30000; // a board's cached lists are shown at once, refreshed when older than this
 // Trello's label colors (the base names; _dark/_light variants map to the same hue).
 const LABEL = { green: "#4bce97", yellow: "#e2b203", orange: "#faa53d", red: "#f87462", purple: "#9f8fef",
@@ -100,8 +114,18 @@ export class Trello {
       try {
         const creds = await this.ready();
         if (!creds) return;
-        const lists = await call(creds, `/boards/${boardId}/lists`, { filter: "open", fields: "name,pos", cards: "open",
-          card_fields: "name,idMembers,labels,pos,due,dueComplete,idShort,shortUrl" });
+        const [lists, customFields] = await Promise.all([
+          call(creds, `/boards/${boardId}/lists`, { filter: "open", fields: "name,pos", cards: "open",
+            card_fields: "name,idMembers,labels,pos,due,dueComplete,idShort,shortUrl" }),
+          call(creds, `/boards/${boardId}/customFields`, {}).catch(() => []),
+        ]);
+        // Estimates: only on a board that has an estimate field.
+        const field = estimateField(customFields);
+        if (field) {
+          const cards = await call(creds, `/boards/${boardId}/cards`, { filter: "open", fields: "id", customFieldItems: "true" });
+          const est = Object.fromEntries(cards.map((c) => [c.id, estimateOf(c.customFieldItems, field)]));
+          for (const l of lists) for (const c of l.cards) c.estimate = est[c.id] ?? null;
+        }
         this.lists[boardId] = lists; this.at[boardId] = Date.now(); this.error = null;
         ls.set(`trello:board:${boardId}`, { lists, at: this.at[boardId] });
       } catch (e) {
@@ -251,6 +275,7 @@ export class Trello {
       .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${c.idShort}`))
       .child(h_flex().flex_none().gap(2).children((c.labels ?? []).slice(0, 4).map((lb) => div().w(10).h(6).rounded(3).bg(labelColor(lb.color)))))
       .child(div().flex_1().min_w(0).truncate().child(c.name))
+      .when(Boolean(c.estimate), (e) => e.child(estimatePill(c.estimate, t)))
       .when(Boolean(c.due), (e) => e.child(div().flex_none().text_size(10).text_color(c.dueComplete ? t.done : late ? t.ansi1 : t.dim)
         .child(new Date(c.due).toLocaleDateString(undefined, { day: "numeric", month: "short" }))));
   }
@@ -262,9 +287,12 @@ export class Trello {
       try {
         const creds = await this.ready();
         if (!creds) throw new Error("Trello isn't connected");
-        this.card = await call(creds, `/cards/${id}`, { fields: "name,desc,due,dueComplete,labels,shortUrl,idShort,dateLastActivity",
+        const card = await call(creds, `/cards/${id}`, { fields: "name,desc,due,dueComplete,labels,shortUrl,idShort,dateLastActivity,idBoard",
           members: "true", member_fields: "fullName", list: "true", list_fields: "name", board: "true", board_fields: "name",
-          checklists: "all", actions: "commentCard", actions_limit: 30 });
+          checklists: "all", actions: "commentCard", actions_limit: 30, customFieldItems: "true" });
+        const field = card.customFieldItems?.length ? estimateField(await call(creds, `/boards/${card.idBoard}/customFields`, {}).catch(() => [])) : null;
+        card.estimate = estimateOf(card.customFieldItems, field);
+        this.card = card;
       } catch (e) { this.cardError = String(e.message ?? e); }
       cx.notify();
     });
@@ -294,7 +322,7 @@ export class Trello {
           .child(div().text_size(17).font_semibold().child(c.name))
           .when((c.labels ?? []).length > 0, (e) => e.child(h_flex().gap(4).flex_wrap().children(c.labels.map((lb) =>
             div().px(6).py(1).rounded(4).bg(labelColor(lb.color)).text_size(11).text_color("#1d2125").child(lb.name || lb.color)))))
-          .child(v_flex().gap(5).children([meta("Board", c.board?.name), meta("Members", (c.members ?? []).map((m) => m.fullName).join(", ")),
+          .child(v_flex().gap(5).children([meta("Board", c.board?.name), meta("Members", (c.members ?? []).map((m) => m.fullName).join(", ")), meta("Estimate", c.estimate),
             meta("Due", c.due ? `${when(c.due)}${c.dueComplete ? " · done" : ""}` : null), meta("Activity", when(c.dateLastActivity))].filter(Boolean)))
           .child(div().h(1).bg(t.border))
           // Trello descriptions are markdown already.

@@ -63,14 +63,35 @@ async function findBase(site, auth) {
   throw rejected;
 }
 
-// A project's board columns, in board order: [{ name, statuses: [status id] }], or null without a board.
-// The board that belongs to the project (its location) wins over one that merely shows it.
-async function boardColumns(base, auth, project) {
+// A project's board: its columns in board order ([{ name, statuses: [status id] }]) and the
+// field it estimates with (Story point estimate: "customfield_10016", or "timeoriginalestimate"),
+// or null without a board. The board that belongs to the project (its location) wins over one
+// that merely shows it.
+async function boardConfig(base, auth, project) {
   const { values = [] } = await jira(base, auth, `/rest/agile/1.0/board?projectKeyOrId=${encodeURIComponent(project)}&maxResults=50`);
   const board = values.find((b) => b.location?.projectKey === project) ?? values[0];
   if (!board) return null;
   const cfg = await jira(base, auth, `/rest/agile/1.0/board/${board.id}/configuration`);
-  return (cfg.columnConfig?.columns ?? []).map((c) => ({ name: c.name, statuses: (c.statuses ?? []).map((x) => String(x.id)) }));
+  return {
+    columns: (cfg.columnConfig?.columns ?? []).map((c) => ({ name: c.name, statuses: (c.statuses ?? []).map((x) => String(x.id)) })),
+    estimate: cfg.estimation?.type === "field" ? cfg.estimation.field?.fieldId ?? null : null,
+  };
+}
+
+// The estimate at a task row's right end (Jira and Trello alike).
+const estimatePill = (text, t) => div().flex_none().px(5).rounded(4).border_1().border_color(t.border)
+  .text_size(10).text_color(t.muted).child(text);
+
+// An issue's estimate as shown ("3 SP", "4h"), or null: `field` is its board's estimation field.
+function estimateText(fields, field) {
+  const v = field ? fields?.[field] : null;
+  if (v == null || v === "") return null;
+  if (field === "timeoriginalestimate" || field === "timeestimate") {
+    const h = Number(v) / 3600;
+    return h >= 8 && h % 8 === 0 ? `${h / 8}d` : `${+h.toFixed(1)}h`;
+  }
+  if (typeof v === "number") return `${+v.toFixed(1)} SP`;
+  return String(v.value ?? v.name ?? v);
 }
 
 const normalizeSite = (text) => {
@@ -195,7 +216,7 @@ export default class Jira extends View {
     const k = id ?? "-";
     if (!this.jst[k]) {
       const c = id ? store.get(`jira:cache:${id}`, null) : null;
-      const st = { issues: c?.issues ?? [], backlog: c?.backlog ?? [], columns: c?.columns ?? {}, at: c?.at ?? 0, verified: false, error: null, loading: false };
+      const st = { issues: c?.issues ?? [], backlog: c?.backlog ?? [], columns: c?.columns ?? {}, estimate: c?.estimate ?? {}, at: c?.at ?? 0, verified: false, error: null, loading: false };
       st.groups = this.group(st.issues, st.columns); st.count = st.issues.length;
       this.jst[k] = st;
     }
@@ -289,16 +310,29 @@ export default class Jira extends View {
         // ponytail: first 100 of mine and 50 of the backlog; page with nextPageToken if that's ever too few.
         const fields = ["summary", "status", "issuetype", "labels", "project"];
         const search = (jql, fields, maxResults) => jira(base, creds.auth, "/rest/api/3/search/jql", { jql, fields, maxResults });
-        const [{ issues = [] }, { issues: backlog = [] }] = await Promise.all([
-          search(MINE_JQL, fields, 100),
-          project ? search(backlogJql(project), ["summary", "status", "issuetype", "labels"], 50) : { issues: [] },
+        // Each project's board, once: its columns and its estimation field.
+        const learn = async (key) => {
+          if (key in st.columns && key in st.estimate) return;
+          const cfg = await boardConfig(base, creds.auth, key).catch(() => null);
+          st.columns[key] = cfg?.columns ?? null; st.estimate[key] = cfg?.estimate ?? null;
+        };
+        const estimates = () => [...new Set(Object.values(st.estimate).filter(Boolean))];
+        if (project) await learn(project);
+        const asked = estimates();
+        let [{ issues = [] }, { issues: backlog = [] }] = await Promise.all([
+          search(MINE_JQL, [...fields, ...asked], 100),
+          project ? search(backlogJql(project), ["summary", "status", "issuetype", "labels", ...asked], 50) : { issues: [] },
         ]);
-        for (const key of new Set(issues.map((i) => i.fields.project?.key).filter(Boolean))) {
-          if (!(key in st.columns)) st.columns[key] = await boardColumns(base, creds.auth, key).catch(() => null);
-        }
+       
+        for (const key of new Set(issues.map((i) => i.fields.project?.key).filter(Boolean))) await learn(key);
+       
+        // A project seen for the first time estimates with a field not asked for yet: ask again, once.
+        if (estimates().some((f) => !asked.includes(f))) ({ issues = [] } = await search(MINE_JQL, [...fields, ...estimates()], 100));
+        for (const i of issues) i.estimate = estimateText(i.fields, st.estimate[i.fields.project?.key]);
+        for (const i of backlog) i.estimate = estimateText(i.fields, st.estimate[project]);
         st.issues = issues; st.groups = this.group(issues, st.columns);
         st.backlog = backlog; st.count = issues.length; st.error = null; st.at = Date.now();
-        store.set(`jira:cache:${id}`, { issues, columns: st.columns, backlog, at: st.at });
+        store.set(`jira:cache:${id}`, { issues, columns: st.columns, estimate: st.estimate, backlog, at: st.at });
       } catch (e) {
         if (e.status === 401) { st.verified = false; st.error = "Jira rejected this account's token · edit it (⚙) to paste a new one"; }
         else st.error = String(e.message ?? e);
@@ -400,8 +434,12 @@ export default class Jira extends View {
       try {
         const acc = this.detailAcc, creds = await credentials(acc), base = acc?.base ?? acc?.site;
         if (!creds || !base) throw new Error("Jira isn't connected");
-        const f = "summary,status,issuetype,priority,assignee,reporter,labels,description,comment,created,updated,parent,project";
+        // The estimation field: known from the list's cache, else asked of the project's board.
+        const pk = this.detailKey.split("-")[0], known = store.get(`jira:cache:${acc.id}`, null)?.estimate ?? {};
+        const est = pk in known ? known[pk] : (await boardConfig(base, creds.auth, pk).catch(() => null))?.estimate ?? null;
+        const f = "summary,status,issuetype,priority,assignee,reporter,labels,description,comment,created,updated,parent,project" + (est ? `,${est}` : "");
         this.detail = await jira(base, creds.auth, `/rest/api/3/issue/${encodeURIComponent(this.detailKey)}?fields=${f}`);
+        this.detail.estimate = estimateText(this.detail.fields, est);
       } catch (e) { this.detailError = String(e.message ?? e); }
       cx.notify();
     });
@@ -433,7 +471,7 @@ export default class Jira extends View {
           .child(div().text_size(17).font_semibold().child(f.summary ?? ""))
           .child(v_flex().gap(5)
             .children([meta("Assignee", f.assignee?.displayName ?? "Unassigned"), meta("Reporter", f.reporter?.displayName),
-              meta("Priority", f.priority?.name), meta("Parent", f.parent ? `${f.parent.key} ${f.parent.fields?.summary ?? ""}` : null),
+              meta("Estimate", d.estimate), meta("Priority", f.priority?.name), meta("Parent", f.parent ? `${f.parent.key} ${f.parent.fields?.summary ?? ""}` : null),
               meta("Labels", (f.labels ?? []).join(", ")), meta("Updated", when(f.updated))].filter(Boolean)))
           .child(div().h(1).bg(t.border))
           .child(f.description ? TextView.markdown(`desc-${key}`, adf(f.description)) : div().text_color(t.dim).child("No description"))
@@ -563,7 +601,8 @@ export default class Jira extends View {
       .child(div().flex_none().text_size(11).text_color(t.dim).child(issue.key))
       .when(this.dragging && this.press === issue.key, (e) => e.opacity(0.45))
       .child(div().flex_none().size(6).rounded(3).bg(color))
-      .child(div().flex_1().min_w(0).truncate().child(f.summary ?? ""));
+      .child(div().flex_1().min_w(0).truncate().child(f.summary ?? ""))
+      .when(Boolean(issue.estimate), (e) => e.child(estimatePill(issue.estimate, t)));
   }
 
   render(cx) {
