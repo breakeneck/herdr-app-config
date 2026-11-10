@@ -11,7 +11,7 @@ const USE_TITLE = { commit: "Commit message", review: "AI review", mr: "MR descr
 const openModels = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
 
 // What the template is without this project's own text: the all-projects one, else the built-in.
-const inherited = (use, project) => { const t = settingsFor(use, "*").template; return t || DEFAULTS[use]; };
+const inherited = (use, project) => { if (project === "*") return DEFAULTS[use]; const t = settingsFor(use, "*").template; return t || DEFAULTS[use]; };
 
 export default class AiModels extends View {
   init(_props, cx) {
@@ -27,7 +27,7 @@ export default class AiModels extends View {
     const { use, project } = props() ?? {};
     if (use) {
       this.langI = InputState.new({ placeholder: "Another language…" });
-      this.langI.on("change", () => { const v = this.langI.value().trim(); if (v) setSetting(use, project, { language: v }); });
+      this.langI.on("change", () => { const v = this.langI.value().trim(); setSetting(use, project, { language: v }); });
       this.template = TextareaState.new({ placeholder: DEFAULTS[use], rows: 6 });
       this.template.set_value(settingsFor(use, project).template);
       const keep = () => { const v = this.template.value().trim(); setSetting(use, project, { template: v === inherited(use, project) ? "" : v }); };

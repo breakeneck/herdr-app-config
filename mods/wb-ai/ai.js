@@ -113,14 +113,14 @@ const keys = new Map();
 export async function projectKey({ cwd, on }) {
   const id = `${on}|${cwd}`;
   if (keys.has(id)) return keys.get(id);
-  let key = null;
-  const r = await exec("git", ["remote", "get-url", "origin"], { cwd, on }).catch(() => null);
+  let key = null, answered = true;
+  const r = await exec("git", ["remote", "get-url", "origin"], { cwd, on }).catch(() => { answered = false; return null; });
   if (r?.code === 0) key = remoteKey(r.stdout.trim());
   if (!key) {
-    const t = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
+    const t = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => { answered = false; return null; });
     key = `${on ?? "local"}:${(t?.code === 0 && t.stdout.trim()) || cwd}`;
   }
-  keys.set(id, key);
+  if (answered) keys.set(id, key);
   return key;
 }
 export const projectName = (key) => String(key ?? "").includes("|") ? key.split("|").slice(1).join("|") : String(key ?? "").replace(/\/+$/, "").split("/").pop() || String(key ?? "");

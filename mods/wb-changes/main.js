@@ -76,7 +76,7 @@ export default class Changes extends View {
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
       this.context = context; this.collapsed = new Set(); this.root = null; this.files = []; this.open = null;
-      this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
+      this.pk = null; this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
     }
     if (!cwd) return;
     this.loading = true;
