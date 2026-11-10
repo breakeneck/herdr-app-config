@@ -3,7 +3,7 @@ import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, 
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
 import { CreateDialog } from "./create.js";
-import { migrateAi, models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
+import { migrate, models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
 import { getSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
@@ -107,7 +107,7 @@ const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle:
 export default class Prs extends View {
   init(_props, cx) {
     S.migrateKeys(["sections.collapsed"]);
-    migrateAi();
+    migrate();
     // Opened as a popup for one PR/MR (click on a row): its description, comments and approvals.
     if (props()?.create) {
       this.creating = new CreateDialog(props().create.repo, { gitlab, gitlabToken, installed });
