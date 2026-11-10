@@ -2,7 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
-import { migrateAi, models, modelFor, setUse, runModel, describe } from "./ai.js";
+import { migrateAi, models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
 import { getSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
@@ -18,10 +18,7 @@ function installed(name, fresh) {
 // AI review drafts, per PR/MR url, until posted or discarded: shared "wb.ai.reviewDrafts" = { url: { text, model, at } }.
 const DRAFTS = "wb.ai.reviewDrafts";
 const openAiModels = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
-const REVIEW_PROMPT = "You are reviewing a pull request. Write a concise code review in GitHub-flavored markdown: "
-  + "a short summary of what it changes, then the concrete problems you find (bugs, risks, missing tests, unclear code) as a list, "
-  + "each with a file:line reference and why it matters, then optional suggestions. Skip praise and nitpicks; if nothing is wrong, say so briefly. "
-  + "Reply with the review only.";
+const openReviewSettings = (repo) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "review", project: repo.key, projectName: repo.name } });
 
 // My open pull requests in the repo of the focused folder. Click opens it in the browser.
 // GitHub: via the `gh` CLI. GitLab (any other host, e.g. a self-hosted git.example.com): merge requests
@@ -271,12 +268,12 @@ export default class Prs extends View {
 
   aiReview(cx) {
     if (this.reviewing || !this.detail) return;
-    const pr = this.detailPr, d = this.detail, model = modelFor("review");
+    const pr = this.detailPr, d = this.detail, cfg = settingsFor("review", pr.repo.key), model = cfg.model;
     this.reviewing = true; this.reviewError = null; this.aiMenu = false; cx.notify();
     cx.spawn(async (cx) => {
       try {
         const diff = await this.diffText();
-        const prompt = `${REVIEW_PROMPT}\n\nTitle: ${d.title}\n\nDescription:\n${(d.body || "(none)").slice(0, 8000)}\n\nDiff (${d.from} → ${d.to}):\n${diff.slice(0, 90000)}${diff.length > 90000 ? "\n… (diff truncated)" : ""}`;
+        const prompt = `${cfg.template} ${languageLine(cfg.language)}\n\nTitle: ${d.title}\n\nDescription:\n${(d.body || "(none)").slice(0, 8000)}\n\nDiff (${d.from} → ${d.to}):\n${diff.slice(0, 90000)}${diff.length > 90000 ? "\n… (diff truncated)" : ""}`;
         // A CLI model runs inside the repo on its machine, so it can open more of the code than the diff.
         const text = await runModel(model, prompt, { cwd: pr.repo.cwd, on: pr.repo.on });
         if (!text) throw new Error("the model returned nothing");
@@ -347,10 +344,12 @@ export default class Prs extends View {
       .border_1().border_color(t.border).bg(t.popover).shadow_lg().on_mouse_down_out((_e, cx) => { this.aiMenu = false; cx.notify(); })
       .child(div().px(8).py(4).text_size(10).font_semibold().text_color(t.dim).child("REVIEW WITH"))
       .children(models().map((m) => h_flex().id(`rv-${m.id}`).h(26).px(8).gap(6).items_center().rounded(5).cursor_pointer()
-        .when(modelFor("review")?.id === m.id, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { setUse("review", m.id); this.aiMenu = false; cx.notify(); })
+        .when(modelFor("review", pr.repo.key)?.id === m.id, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { setUse("review", m.id, pr.repo.key); this.aiMenu = false; cx.notify(); })
         .child(div().flex_1().truncate().text_size(12).child(m.name)).child(div().text_size(11).text_color(t.dim).child(describe(m)))))
       .when(installed("wb-ai"), (e) => e.child(div().h(1).my(2).bg(t.border)))
+      .when(installed("wb-ai"), (e) => e.child(h_flex().id("rv-project").h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.aiMenu = false; openReviewSettings(pr.repo); cx.notify(); }).child("Review settings…")))
       .when(installed("wb-ai"), (e) => e.child(h_flex().id("rv-settings").h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => { this.aiMenu = false; openAiModels(); cx.notify(); }).child("AI models…")));
     return v_flex().id("pr-detail").size_full().min_h(0).relative().bg(t.background).text_color(t.foreground).text_size(13)
@@ -361,7 +360,7 @@ export default class Prs extends View {
         // AI review, and ▾: which model reviews (shared list) and the AI models window.
         .child(h_flex().id("ai-review").h(26).flex_none().rounded(6).border_1().border_color(t.accent).overflow_hidden()
           .child(h_flex().id("ai-run").h_full().px(10).gap(6).items_center().text_size(12).text_color(t.accent).cursor_pointer()
-            .hover((s) => s.bg(t.hover)).tooltip(`Review with ${modelFor("review")?.name ?? "no model"} (${describe(modelFor("review"))})`)
+            .hover((s) => s.bg(t.hover)).tooltip(`Review with ${modelFor("review", pr.repo.key)?.name ?? "no model"} (${describe(modelFor("review", pr.repo.key))})`)
             .on_click((_e, cx) => this.aiReview(cx))
             .child(this.reviewing ? svg("mods/wb-prs/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : div().child("✦"))
             .child(this.reviewing ? "Reviewing…" : "AI review"))
@@ -386,7 +385,7 @@ export default class Prs extends View {
           .when(Boolean(this.draftInfo()) || this.reviewing, (e) => e.child(v_flex().gap(8).p(10).rounded(8).border_1().border_color(t.accent).bg(t.raised)
             .child(h_flex().gap(8).items_center().text_size(11)
               .child(div().font_semibold().text_color(t.accent).child("AI REVIEW · DRAFT"))
-              .child(div().text_color(t.dim).child(this.reviewing ? `${modelFor("review")?.name ?? ""} is reviewing…` : [this.draftInfo()?.model, when(this.draftInfo()?.at)].filter(Boolean).join(" · ")))
+              .child(div().text_color(t.dim).child(this.reviewing ? `${modelFor("review", pr.repo.key)?.name ?? ""} is reviewing…` : [this.draftInfo()?.model, when(this.draftInfo()?.at)].filter(Boolean).join(" · ")))
               .child(div().flex_1())
               .child(btn("draft-discard", "Discard", (_e, cx) => { this.dropDraft(); cx.notify(); }))
               .child(btn("draft-again", "Regenerate", (_e, cx) => this.aiReview(cx)))

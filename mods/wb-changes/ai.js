@@ -1,16 +1,29 @@
-// AI models shared by the whole app: one list of models, and each use (commit messages, PR review)
-// picks its own. SAME FILE in every mod that uses it. The canonical copy is mods/wb-ai/ai.js:
+// AI models shared by the whole app: one list of models, and each use (commit messages, PR review,
+// MR descriptions) picks its own, per project (repo) when set there. SAME FILE in every mod that uses it. The canonical copy is mods/wb-ai/ai.js:
 // edit it there, then run `scripts/sync-helpers.sh --write` to copy it over the others.
 //
 // shared "wb.ai.models" = [{ id, name, provider: "claude" | "codex" | "local", command?, args?, model, url? }]
-// shared "wb.ai.use"    = { commit: <model id>, review: <model id> }
+// shared "wb.ai.use"    = { commit: <model id>, review: <model id>, mr: <model id> }  (global default model per use)
+// shared "wb.ai.project" = { [projectKey]: { [use]: { model?, template?, language?, noBlank? } } }
+//   projectKey = "<host>|<path>" of the origin remote (see projectKey()); "*" holds defaults for every project.
 // claude / codex run their CLI (the person's subscription) inside the repo folder, on the repo's
 // machine; local calls an OpenAI-compatible server (Ollama, LM Studio, llama.cpp).
 
 import { exec, readTextFile, shared, setShared } from "herdr";
 
 export const MODELS = "wb.ai.models", USE = "wb.ai.use";
-export const USES = [["commit", "Commit messages"], ["review", "PR review"]];
+export const USES = [["commit", "Commit messages"], ["review", "PR review"], ["mr", "MR description"]];
+export const PROJECT = "wb.ai.project";
+export const DEFAULTS = {
+  commit: "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it. No blank lines anywhere.",
+  review: "You are reviewing a pull request. Write a concise code review in GitHub-flavored markdown: "
+    + "a short summary of what it changes, then the concrete problems you find (bugs, risks, missing tests, unclear code) as a list, "
+    + "each with a file:line reference and why it matters, then optional suggestions. Skip praise and nitpicks; if nothing is wrong, say so briefly. "
+    + "Reply with the review only.",
+  mr: "Write a merge request description in GitHub-flavored markdown: a one-paragraph summary of what it changes and why, then a short bullet list of the notable changes, then how to test it if that is not obvious. No title line, no praise.",
+};
+export const LANGUAGES = ["English", "Ukrainian", "Polish", "German", "Spanish", "French"];
+export const languageLine = (lang) => `Write it in ${lang || "English"}.`;
 export const PROVIDERS = {
   claude: { label: "Claude", command: "claude", args: "-p", hint: "The claude CLI on the repo's machine, on your subscription." },
   codex: { label: "Codex", command: "codex", args: "exec", hint: "The codex CLI on the repo's machine (codex login: your ChatGPT subscription), read-only sandbox." },
@@ -51,11 +64,64 @@ function ensure() {
 }
 
 export function models() { ensure(); return shared(MODELS) ?? []; }
-export function modelFor(use) {
-  const list = models(), id = (shared(USE) ?? {})[use];
-  return list.find((m) => m.id === id) ?? list[0] ?? null;
+
+// One-time: the old global commit template / "No blank lines" (shared "wb.commit.gen") become the
+// commit defaults for every project (key "*").
+function migrateProject() {
+  if (shared("wb.ai.projectMigrated")) return;
+  setShared("wb.ai.projectMigrated", true);
+  const c = shared("wb.commit.gen") ?? {}, tpl = String(c.template ?? "").trim();
+  if (!tpl && c.noBlank !== false) return;
+  const all = shared(PROJECT) ?? {};
+  setShared(PROJECT, { ...all, "*": { ...all["*"], commit: { ...(tpl ? { template: tpl } : {}), ...(c.noBlank === false ? { noBlank: false } : {}), ...all["*"]?.commit } } });
 }
-export const setUse = (use, id) => setShared(USE, { ...(shared(USE) ?? {}), [use]: id });
+const stored = (use, key) => { migrateProject(); const all = shared(PROJECT) ?? {}; return [all[key]?.[use] ?? {}, all["*"]?.[use] ?? {}]; };
+
+// The model for a use: the project's pick, else the global one, else the first model.
+export function modelFor(use, key) {
+  const list = models(), id = (key && stored(use, key)[0].model) || (shared(USE) ?? {})[use];
+  return list.find((m) => m.id === id) ?? list.find((m) => m.id === (shared(USE) ?? {})[use]) ?? list[0] ?? null;
+}
+// Effective settings of a use in a project; missing fields fall back project -> "*" -> built-in.
+export function settingsFor(use, key) {
+  const [p, g] = stored(use, key);
+  return {
+    model: modelFor(use, key),
+    template: p.template || g.template || DEFAULTS[use],
+    language: p.language || g.language || "English",
+    noBlank: use === "commit" ? (p.noBlank ?? g.noBlank ?? true) : undefined,
+  };
+}
+export function setSetting(use, key, patch) {
+  const all = shared(PROJECT) ?? {};
+  setShared(PROJECT, { ...all, [key]: { ...all[key], [use]: { ...all[key]?.[use], ...patch } } });
+}
+export function setUse(use, id, key) {
+  if (key) setSetting(use, key, { model: id });
+  else setShared(USE, { ...(shared(USE) ?? {}), [use]: id });
+}
+
+// "<host>|<path>" of a git remote url (https://h/a/b.git, git@h:a/b.git, ssh://git@h:22/a/b); null if none.
+export function remoteKey(url) {
+  const m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(url) ?? /^(?:[^@]+@)?([^:/]+):(.+?)(?:\.git)?\/?$/.exec(url);
+  return m ? `${m[1].toLowerCase()}|${m[2]}` : null;
+}
+// Pure cache (module code is shared by copies), so sharing it is fine.
+const keys = new Map();
+export async function projectKey({ cwd, on }) {
+  const id = `${on}|${cwd}`;
+  if (keys.has(id)) return keys.get(id);
+  let key = null;
+  const r = await exec("git", ["remote", "get-url", "origin"], { cwd, on }).catch(() => null);
+  if (r?.code === 0) key = remoteKey(r.stdout.trim());
+  if (!key) {
+    const t = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
+    key = `${on ?? "local"}:${(t?.code === 0 && t.stdout.trim()) || cwd}`;
+  }
+  keys.set(id, key);
+  return key;
+}
+export const projectName = (key) => String(key ?? "").includes("|") ? key.split("|").slice(1).join("|") : String(key ?? "").replace(/\/+$/, "").split("/").pop() || String(key ?? "");
 export function saveModel(m) {
   const list = models();
   setShared(MODELS, list.some((x) => x.id === m.id) ? list.map((x) => (x.id === m.id ? m : x)) : [...list, m]);
