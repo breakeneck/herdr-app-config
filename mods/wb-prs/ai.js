@@ -77,6 +77,17 @@ const split = (s) => String(s || "").split(/\s+/).filter(Boolean);
 const clean = (text) => String(text ?? "").replace(/^```[^\n]*\n/, "").replace(/\n?```\s*$/, "").trim();
 
 // Runs a model on a prompt and returns its answer. `cwd` / `on`: where a CLI runs (the repo).
+// exec, but a CLI missing on that machine says so plainly instead of "herdr.exec: cannot start …".
+async function run(cmd, args, { cwd, on }) {
+  try { return await exec(cmd, args, { cwd, on, timeout: 600000 }); }
+  catch (e) {
+    const msg = String(e?.message ?? e);
+    if (/cannot start|No such file|not found/i.test(msg))
+      throw new Error(`\`${cmd}\` isn't installed on ${on ? `machine "${on}"` : "this computer"} (not on its PATH): install it there, or set its full path in AI models settings`);
+    throw e;
+  }
+}
+
 export async function runModel(m, prompt, { cwd, on } = {}) {
   if (!m) throw new Error("No AI model: add one in AI models settings");
   if (m.provider === "local") {
@@ -92,13 +103,13 @@ export async function runModel(m, prompt, { cwd, on } = {}) {
     // The final answer goes to a file (-o): codex's stdout also carries its progress.
     const out = `/tmp/herdr-codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
     const args = [...split(m.args || "exec"), ...(m.model ? ["-m", m.model] : []), "--skip-git-repo-check", "-s", "read-only", "-o", out, prompt];
-    const r = await exec(m.command || "codex", args, { cwd, on, timeout: 600000 });
+    const r = await run(m.command || "codex", args, { cwd, on });
     const text = await readTextFile(out, { on }).catch(() => null);
     exec("rm", ["-f", out], { on }).catch(() => {});
     if (r.code !== 0 && !text) throw new Error((r.stderr || r.stdout || "codex failed").trim().slice(-300));
     return clean(text ?? r.stdout);
   }
-  const r = await exec(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), prompt], { cwd, on, timeout: 600000 });
+  const r = await run(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), prompt], { cwd, on });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout || "no output").trim().slice(0, 300));
   return clean(r.stdout);
 }
