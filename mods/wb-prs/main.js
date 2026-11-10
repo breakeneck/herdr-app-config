@@ -2,6 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 import * as S from "./section.js";
+import { CreateDialog } from "./create.js";
 import { migrateAi, models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
 import { getSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
@@ -108,6 +109,10 @@ export default class Prs extends View {
     S.migrateKeys(["sections.collapsed"]);
     migrateAi();
     // Opened as a popup for one PR/MR (click on a row): its description, comments and approvals.
+    if (props()?.create) {
+      this.creating = new CreateDialog(props().create.repo, { gitlab, gitlabToken, installed });
+      this.creating.init(cx); return;
+    }
     if (props()?.pr) {
       this.detailPr = props().pr; this.reviewing = false; this.aiMenu = false; this.posting = false;
       // The review draft: editable, kept (shared) until posted or discarded.
@@ -442,6 +447,16 @@ export default class Prs extends View {
     });
   }
 
+  // The create dialog for the focused folder's repo.
+  openCreate(cx) {
+    const loc = location();
+    cx.spawn(async (cx) => {
+      const r = await this.repoOf(loc);
+      if (!r.host || !loc.cwd) { notify({ title: "No git remote (origin) in this folder", level: "error" }); return; }
+      openOverlay({ mod: "wb-prs", kind: "dialog", width: 620, height: 0.85, props: { create: { repo: { ...r, ...loc } } } });
+    });
+  }
+
   refreshOne(r, cx) {
     if (this.fetching.has(r.key)) return;
     this.fetching.add(r.key); cx.notify();
@@ -541,6 +556,7 @@ export default class Prs extends View {
   }
 
   render(cx) {
+    if (this.creating) return this.creating.render(theme());
     if (this.detailPr) return this.detailView(theme());
     this.follow(cx);
     // An approval made in a popup: re-fetch that repo here.
@@ -569,6 +585,9 @@ export default class Prs extends View {
             .bg(this.mine === v ? t.selected : t.background).text_color(this.mine === v ? t.foreground : t.muted)
             .tooltip(v ? "Only the ones I opened" : "Every open one in this repo")
             .on_click((_e, cx) => { cx.stop_propagation(); if (this.mine !== v) this.toggleMine(cx); }).child(label))))
+        .child(div().id("create").h(24).px(7).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_pointer().text_size(10).text_color(t.muted)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("New pull/merge request from the current branch")
+          .on_click((_e, cx) => { cx.stop_propagation(); this.openCreate(cx); }).child("+ Create"))
         .child(refresh))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("prs-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
