@@ -573,7 +573,7 @@ export default class Jira extends View {
     if (this.cardPopup) return this.trello.cardView(t);
     // A space switch: follow it right after this frame (render itself mustn't notify).
     const loc = location();
-    if (`${loc.on}|${loc.cwd}` !== this.loc && !this.followSoon) { this.followSoon = true; cx.spawn(async (cx) => { this.followSoon = false; this.follow(cx); }); }
+    if (`${loc.on}|${loc.cwd}` !== this.loc && !this.followSoon) { this.followSoon = true; cx.spawn(async (cx) => { await Promise.resolve(); this.followSoon = false; this.follow(cx); }); }
     const src = this.source(), tr = src.kind === "trello", jr = src.kind === "jira", T = this.trello;
     const J = this.st(jr ? src.account : null), acc = jr ? jiraAccount(src.account) : tr ? trelloAccount(src.account) : null;
     const repoName = (this.repo ?? "").split("|").pop().split("/").pop() || "this project";
