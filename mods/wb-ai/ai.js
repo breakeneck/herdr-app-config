@@ -15,7 +15,7 @@ export const MODELS = "wb.ai.models", USE = "wb.ai.use";
 export const USES = [["commit", "Commit messages"], ["review", "PR review"], ["mr", "MR description"]];
 export const PROJECT = "wb.ai.project";
 export const DEFAULTS = {
-  commit: "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it. No blank lines anywhere.",
+  commit: "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it.",
   review: "You are reviewing a pull request. Write a concise code review in GitHub-flavored markdown: "
     + "a short summary of what it changes, then the concrete problems you find (bugs, risks, missing tests, unclear code) as a list, "
     + "each with a file:line reference and why it matters, then optional suggestions. Skip praise and nitpicks; if nothing is wrong, say so briefly. "
@@ -67,6 +67,8 @@ export function models() { ensure(); return shared(MODELS) ?? []; }
 
 // One-time: the old global commit template / "No blank lines" (shared "wb.commit.gen") become the
 // commit defaults for every project (key "*").
+// Call it from init (it writes shared state; never from render).
+export function migrate() { migrateAi(); models(); migrateProject(); }
 function migrateProject() {
   if (shared("wb.ai.projectMigrated")) return;
   setShared("wb.ai.projectMigrated", true);
@@ -75,7 +77,7 @@ function migrateProject() {
   const all = shared(PROJECT) ?? {};
   setShared(PROJECT, { ...all, "*": { ...all["*"], commit: { ...(tpl ? { template: tpl } : {}), ...(c.noBlank === false ? { noBlank: false } : {}), ...all["*"]?.commit } } });
 }
-const stored = (use, key) => { migrateProject(); const all = shared(PROJECT) ?? {}; return [all[key]?.[use] ?? {}, all["*"]?.[use] ?? {}]; };
+const stored = (use, key) => { const all = shared(PROJECT) ?? {}; return [all[key]?.[use] ?? {}, all["*"]?.[use] ?? {}]; };
 
 // The model for a use: the project's pick, else the global one, else the first model.
 export function modelFor(use, key) {

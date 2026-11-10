@@ -2,7 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
-import { migrateAi, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
+import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
 function installed(name, fresh) {
@@ -34,7 +34,7 @@ const openCommitSettings = (project) => openOverlay({ mod: "wb-ai", kind: "dialo
 export default class Changes extends View {
   init(_props, cx) {
     S.migrateKeys(["sections.collapsed"]);
-    migrateAi();
+    migrate();
     this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
     try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("scope") === "base") this.scope = "base"; } catch {}
     this.message = ""; this.handle = cx.focus_handle(); this.generating = false;
@@ -131,6 +131,10 @@ export default class Changes extends View {
         if (stale()) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
         this.watch(root, gitDir, cx);
+        // The project (repo) key for per-project AI settings; cached in ai.js after the first lookup.
+        const pk = await projectKey({ cwd: root, on });
+        if (stale()) return;
+        this.pk = pk;
         if (this.open && !files.some((f) => f.path === this.open)) this.open = null;
         // The first changed file is highlighted; its diff itself opens in the main area on click.
         if (!this.open && !this.closed && files.length) this.open = files[0].path;
@@ -233,16 +237,6 @@ export default class Changes extends View {
     else run("tab.new", { name: path.split("/").pop(), mod: "wb-diff", props: req, space: space?.id ?? undefined });
   }
 
-  // The project (repo) key of the current folder, cached per root; null until it is known.
-  projectKeyOf(cx) {
-    if (!this.root) return null;
-    const id = `${this.on}|${this.root}`;
-    if (this.pkFor !== id) {
-      this.pkFor = id; this.pk = null;
-      projectKey({ cwd: this.root, on: this.on }).then((k) => { if (this.pkFor === id) { this.pk = k; cx?.notify(); } });
-    }
-    return this.pk;
-  }
   // Ask the configured model for a commit message from the current diff, and drop it into the textarea.
   // Claude rides the person's subscription and starts inside the repo folder; local goes to the endpoint.
   generate(cx) {
@@ -261,7 +255,7 @@ export default class Changes extends View {
         let text = `Git status:\n${st.stdout}\n\nDiff:\n${(df.stdout || "").slice(0, 60000)}`;
         if (fresh.length) text += `\n\nNew untracked files (contents not shown): ${fresh.join(", ")}`;
         // The project's template (wb-ai settings) says how the message looks; blank lines are dropped unless allowed.
-        const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template} Reply with the message only — no quotes, no code fences, no explanations. ${languageLine(cfg.language)}`;
+        const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template}${cfg.noBlank !== false ? " No blank lines anywhere." : ""} Reply with the message only — no quotes, no code fences, no explanations. ${languageLine(cfg.language)}`;
         let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on });
         if (cfg.noBlank !== false) msg = msg.split("\n").filter((l) => l.trim()).join("\n");
         if (!msg) throw new Error("the model returned nothing");
@@ -373,10 +367,10 @@ export default class Changes extends View {
         .child(div().id("commit-message").w_full().h(this.commitH).flex_none().overflow_hidden().px(10).py(6).rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.input).w_full().h(this.commitH - 14).text_size(12).text_color(t.foreground)))
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
-            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.projectKeyOf(cx))?.name ?? "no model"} (${describe(modelFor("commit", this.projectKeyOf(cx)))})`)
+            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
               .child(this.generating ? svg("mods/wb-changes/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/wb-changes/icons/layers.svg").size(12))
               .child(this.generating ? "Generating…" : "Generate"))
-            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 130, props: { menu: true, project: this.projectKeyOf() } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
+            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 130, props: { menu: true, project: this.pk } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           .child(div().id("commit").h(30).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit"))))
       .when(Boolean(ov), (e) => e.child(ov));
