@@ -7,7 +7,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { highlight, languageFor } from "./highlight.js";
-import { props, shared, spaces, theme, settings, exec, readTextFile, run } from "herdr";
+import { props, shared, spaces, panes, theme, settings, exec, readTextFile, run } from "herdr";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const ROW = 20, CHAR_W = 11 * 0.6;
@@ -48,7 +48,9 @@ function sideBySide(lines) {
 export default class DiffView extends View {
   init(_props, cx) {
     this.req = props()?.path ? props() : shared("wb.diff.request") ?? null;
-    this.mode = "diff"; // "diff": hunks with context; "file": the whole file, changes highlighted
+    // "file" (default): the whole file, changes highlighted, prev/next scroll to them; "diff": hunks only.
+    this.mode = (() => { try { return localStorage.getItem("mode") || "file"; } catch { return "file"; } })();
+    this.runs = []; // file mode: [from, to) row ranges of each change, matching this.hunks
     this.rows = []; this.hunks = []; this.cur = -1; this.scrollY = 0; this.viewH = 400;
     this.leftW = 300; this.rightW = 300; this.error = null; this.loading = false;
     this.applied = this.req?.ts ?? 0; this.lang = null; this.thumbDrag = null;
@@ -61,7 +63,7 @@ export default class DiffView extends View {
   }
 
   load(req, cx) {
-    this.loading = true; this.error = null; this.rows = []; this.hunks = []; this.cur = -1; this.scrollY = 0;
+    this.loading = true; this.error = null; this.rows = []; this.hunks = []; this.runs = []; this.cur = -1; this.scrollY = 0;
     cx.spawn(async (cx) => {
       try {
         // `commit`: that commit's own change to the file (from the Git panel), not the working tree's.
@@ -84,7 +86,11 @@ export default class DiffView extends View {
         if (this.mode === "file") {
           // One @@ header for the whole file: jump between the change runs themselves instead.
           hunks.length = 0;
-          for (let k = 0; k < rows.length; k++) if (rows[k].kind === "x" && rows[k - 1]?.kind !== "x") hunks.push(Math.max(0, k - 3));
+          for (let k = 0; k < rows.length; k++) {
+            if (rows[k].kind !== "x" || rows[k - 1]?.kind === "x") continue;
+            let e = k; while (rows[e]?.kind === "x") e++;
+            hunks.push(k); this.runs.push([k, e]);
+          }
         }
         const cell = (r, s) => r[s]?.text.length ?? 0;
         this.lang = languageFor(path);
@@ -92,6 +98,8 @@ export default class DiffView extends View {
         this.leftW = Math.min(2400, Math.max(20, ...rows.map((r) => (r.kind === "@" ? 0 : cell(r, "left")))) * CHAR_W + 60);
         this.rightW = Math.min(2400, Math.max(20, ...rows.map((r) => (r.kind === "@" ? 0 : cell(r, "right")))) * CHAR_W + 60);
         this.loading = false;
+        // Whole file: start at the first change, like a cursor placed on it.
+        if (this.mode === "file" && hunks.length) this.goto(0);
       } catch (e) { this.error = String(e); this.loading = false; }
       cx.notify();
     });
@@ -99,14 +107,36 @@ export default class DiffView extends View {
 
   // Next / previous hunk, wrapping around; the current one is painted highlighted.
   jump(dir, cx) {
-    if (!this.hunks.length) return;
-    const top = this.scrollY / ROW;
-    let at;
-    if (dir > 0) { at = this.hunks.find((h) => h > top + 1) ?? this.hunks[0]; }
-    else { const before = this.hunks.filter((h) => h < top - 1); at = before.length ? before[before.length - 1] : this.hunks[this.hunks.length - 1]; }
-    this.cur = this.hunks.indexOf(at);
-    this.scrollY = Math.max(0, at * ROW - 8);
+    const n = this.hunks.length;
+    if (!n) return;
+    let idx;
+    if (this.cur >= 0 && this.scrollY === this.jumpedY) idx = (this.cur + dir + n) % n; // still where the last jump left it
+    else {
+      // Scrolled by hand since: the next/previous change from what's on screen now.
+      const top = this.scrollY / ROW + (this.mode === "file" ? (this.viewH || 400) / 3 / ROW : 0);
+      if (dir > 0) { idx = this.hunks.findIndex((h) => h > top + 1); if (idx < 0) idx = 0; }
+      else { idx = -1; this.hunks.forEach((h, k) => { if (h < top - 1) idx = k; }); if (idx < 0) idx = n - 1; }
+    }
+    this.goto(idx);
     cx.notify();
+  }
+
+  // Scroll so change `idx` is in view: in file mode a third down the view, with context above.
+  goto(idx) {
+    this.cur = idx;
+    const at = this.hunks[idx];
+    const lead = this.mode === "file" ? Math.floor((this.viewH || 400) / 3 / ROW) : 0;
+    const max = Math.max(0, this.rows.length * ROW - (this.viewH || 400));
+    this.scrollY = Math.max(0, Math.min(max, (at - lead) * ROW - (this.mode === "file" ? 0 : 8)));
+    this.jumpedY = this.scrollY;
+  }
+
+  // The tab holding this diff, looked up when needed: the id kept at start can be gone or wrong.
+  ownTab() {
+    const mine = panes().filter((p) => p.mod === "wb-diff");
+    if (mine.some((p) => p.tab === this.tab)) return this.tab;
+    const inSpace = new Set(spaces().find((s) => s.id === this.space)?.tabs.map((t) => t.id) ?? []);
+    return mine.find((p) => p.focused)?.tab ?? mine.find((p) => inSpace.has(p.tab))?.tab ?? null;
   }
 
   // One source line as colored spans (same rule as the Changes panel: plain when long or unknown).
@@ -125,9 +155,12 @@ export default class DiffView extends View {
         .text_color(t.dim).text_size(11).child(r.text);
     }
     const c = r[name];
-    const tint = r.kind === "x" && c ? (name === "left" ? t.ansi1 + "18" : t.ansi2 + "18") : null;
+    const run = this.mode === "file" && this.cur >= 0 ? this.runs[this.cur] : null;
+    const now = run && i >= run[0] && i < run[1];
+    const tint = r.kind === "x" && c ? (name === "left" ? t.ansi1 : t.ansi2) + (now ? "30" : "18") : null;
     return h_flex().w(width).h(ROW).flex_none().gap(10)
       .when(Boolean(tint), (e) => e.bg(tint))
+      .when(Boolean(now), (e) => e.border_l(2).border_color(t.accent))
       .child(div().w(30).flex_none().text_right().text_size(11).text_color(t.dim).child(c?.num === undefined ? "" : String(c.num)))
       .child(this.cell(c ? c.text || " " : "", t));
   }
@@ -152,7 +185,7 @@ export default class DiffView extends View {
       .border_1().border_color(t.border).when(this.mode === m, (e) => e.bg(t.selected)).when(this.mode !== m, (e) => e.hover((s) => s.bg(t.hover)))
       .text_color(this.mode === m ? t.foreground : t.muted).tooltip(tip)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { if (this.mode !== m && this.req) { this.mode = m; this.load(this.req, cx); cx.notify(); } })
+      .on_click((_e, cx) => { if (this.mode !== m && this.req) { this.mode = m; try { localStorage.setItem("mode", m); } catch {} this.load(this.req, cx); cx.notify(); } })
       .child(svg(`mods/wb-diff/icons/${icon}.svg`).size(13));
     const stop = (_e, cx) => cx.stop_propagation();
     const column = (name, width) => div().id(`diff-${name}`).flex_1().min_w(0).h_full().overflow_x_scrollbar()
@@ -174,7 +207,7 @@ export default class DiffView extends View {
         .child(modeBtn("file", "file", "Whole file, changes highlighted"))
         .child(nav("diff-prev", "chevron-left", "Previous change (Alt+↑)", -1))
         .child(nav("diff-next", "chevron-right", "Next change (Alt+↓)", 1))
-        .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => run("tab.close", { id: this.tab ?? undefined, confirmed: true })).child(svg("mods/wb-diff/icons/close.svg").size(12))))
+        .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => { const id = this.ownTab(); if (id) run("tab.close", { id, confirmed: true }); }).child(svg("mods/wb-diff/icons/close.svg").size(12))))
       .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
         .on_size_change((s, cx) => { const h = s.height / z; if (h !== this.viewH) { this.viewH = h; cx.notify(); } })
         .on_hover((hovered) => { if (!hovered) this.thumbDrag = null; })
