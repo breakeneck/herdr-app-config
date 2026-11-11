@@ -405,6 +405,8 @@ export default class Prs extends View {
         .child(div().text_size(12).text_color(t.dim).child(num))
         .when(Boolean(d?.approvedBy?.length), (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(t.done).text_size(11).text_color(t.done).child(`✓ approved · ${d.approvedBy.length}`)))
         .child(div().flex_1())
+        // Approve first: it appears once details load, and on the left it doesn't push the buttons after it.
+        .when(Boolean(canApprove), (e) => e.child(btn("approve", d.mineApproved ? "Remove approval" : "Approve", (_e, cx) => this.setApproval(pr, !d.mineApproved, cx), !d.mineApproved)))
         // AI review, and ▾: which model reviews (shared list) and the AI models window.
         .child(h_flex().id("ai-review").h(26).flex_none().rounded(6).border_1().border_color(t.accent).overflow_hidden()
           .child(h_flex().id("ai-run").h_full().px(10).gap(6).items_center().text_size(12).text_color(t.accent).cursor_pointer()
@@ -415,7 +417,6 @@ export default class Prs extends View {
           .child(div().id("ai-menu").w(22).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted)
             .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.aiMenu = !this.aiMenu; cx.notify(); })
             .child(svg("mods/wb-prs/icons/chevron-down.svg").size(11))))
-        .when(Boolean(canApprove), (e) => e.child(btn("approve", d.mineApproved ? "Remove approval" : "Approve", (_e, cx) => this.setApproval(pr, !d.mineApproved, cx), !d.mineApproved)))
         .child(btn("open", "Open", () => exec("open", [pr.url])))
         .child(btn("copy", "Copy link", (_e, cx) => cx.write_to_clipboard(pr.url)))
         .child(div().id("close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
@@ -454,7 +455,10 @@ export default class Prs extends View {
   menuView(t) {
     const { pr, x, y } = this.menu, w = 200, gl = pr.provider === "gitlab";
     const item = (id, label, action) => div().id(id).h(26).px(10).flex().items_center().rounded(5).cursor_pointer().text_size(12)
-      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.menu = null; action(cx); cx.notify(); }).child(label);
+      .hover((s) => s.bg(t.hover))
+      // The menu lies over the rows: keep the press and click from reaching the row (which opens the PR).
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.menu = null; action(cx); cx.notify(); }).child(label);
     return v_flex().id("pr-menu").absolute().top(y).left(Math.max(4, Math.min(x, (this.width ?? w) - w - 4))).w(w).p(4).gap(1)
       .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .on_mouse_down_out((_e, cx) => { this.menu = null; cx.notify(); })
