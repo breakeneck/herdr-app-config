@@ -15,6 +15,9 @@ const humanize = (b) => b.replace(/^[^/]+\//, "").replace(/[-_]+/g, " ").trim() 
 // The dialog only queues a request; the wb-prs panel copy (alive while its block is in the layout) runs it
 // (runMrGeneration, from its timer) and writes the text into the draft, so closing the dialog loses nothing.
 export const DRAFTS = "wb.mr.drafts", GEN = "wb.mr.gen";
+// Targets of the requests created from this dialog, newest first, per repo: shown at the top of Into and picked by default.
+//   shared "wb.mr.recent" = { [repo.key]: [branch, ...] }
+const RECENT = "wb.mr.recent", RECENT_MAX = 5;
 const BOOT = Date.now(); // a job started before this module loaded belonged to code that no longer runs
 export const liveJob = (g) => Boolean(g) && (g.state === "queued" || g.state === "running") && g.at >= BOOT && Date.now() - g.at < 660000;
 export function patchShared(key, id, value) {
@@ -81,7 +84,7 @@ export class CreateDialog {
     const def = d.code === 0 ? d.stdout.trim().replace(/^origin\//, "") : null;
     this.def = def;
     if (keep && this.target && this.branches.includes(this.target)) { await this.pickNow(this.target, cx); return; }
-    const t = [this.wantTarget, def, "main", "master", "develop"].find((b) => b && this.branches.includes(b)) ?? this.branches[0] ?? null;
+    const t = [this.wantTarget, ...this.recent(), def, "main", "master", "develop"].find((b) => b && this.branches.includes(b)) ?? this.branches[0] ?? null;
     if (t) await this.pickNow(t, cx); else cx.notify();
   }
 
@@ -120,7 +123,18 @@ export class CreateDialog {
     return changed;
   }
 
-  visible() { const f = (this.filter ?? "").toLowerCase(); return this.branches.filter((b) => b.toLowerCase().includes(f)); }
+  // Recent targets that still exist on origin, newest first.
+  recent() { return ((shared(RECENT) ?? {})[this.repo.key] ?? []).filter((b) => this.branches.includes(b)); }
+  remember(b) {
+    const k = this.repo.key; if (!k || !b) return;
+    patchShared(RECENT, k, [b, ...((shared(RECENT) ?? {})[k] ?? []).filter((x) => x !== b)].slice(0, RECENT_MAX));
+  }
+  visible() {
+    const f = (this.filter ?? "").toLowerCase(), hit = (b) => b.toLowerCase().includes(f);
+    const rec = this.recent().filter(hit), set = new Set(rec);
+    this.recentCount = rec.length;
+    return [...rec, ...this.branches.filter((b) => !set.has(b) && hit(b))];
+  }
 
   pick(b, cx) { if (this.fatal) return; this.target = b; this.save(); cx.spawn(async (cx) => { await this.pickNow(b, cx); cx.notify(); }); }
 
@@ -194,6 +208,7 @@ export class CreateDialog {
           const x = await exec("gh", args, { cwd: r.cwd, on: r.on, ...LONG });
           if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim());
         }
+        this.remember(this.target);
         notify({ title: gl ? "Merge request created" : "Pull request created", body: title, level: "success" });
         setShared("wb.prs.changed", { repo: r, ts: Date.now() });
         const k = this.dk();
@@ -247,9 +262,15 @@ export class CreateDialog {
           .child(div().relative().h(132).rounded(6).border_1().border_color(t.border)
             .child(v_flex().id("mr-targets").absolute().inset_0().overflow_y_scroll().p(3).gap(1)
               .when(list.length === 0, (e) => e.child(div().p(6).text_size(12).text_color(t.dim).child(this.branches.length ? "No branch matches" : "No remote branches")))
-              .children(list.map((b) => div().id(`mr-t-${b}`).h(24).px(8).flex().flex_none().items_center().rounded(4).cursor_pointer().text_size(12)
-                .when(this.target === b, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover)).truncate()
-                .on_click((_e, cx) => this.pick(b, cx)).child(b)))
+              .children(list.flatMap((b, i) => {
+                const rec = i < this.recentCount;
+                const row = h_flex().id(`mr-t-${b}`).h(24).px(8).gap(6).flex_none().items_center().rounded(4).cursor_pointer().text_size(12)
+                  .when(this.target === b, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
+                  .on_click((_e, cx) => this.pick(b, cx))
+                  .child(div().flex_1().truncate().child(b))
+                  .when(rec, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("recent")));
+                return rec && i === this.recentCount - 1 && list.length > this.recentCount ? [row, div().flex_none().h(1).mx(4).my(2).bg(t.border)] : [row];
+              }))
               .when(more > 0, (e) => e.child(div().p(6).flex_none().text_size(11).text_color(t.dim).child(`… ${more} more, type to filter`))))
             .child(Scrollbar.vertical("mr-targets").absolute().inset_0())))
         .child(v_flex().gap(4).child(label("TITLE")).child(field("mr-title", Input.new(this.title).h_full().w_full().text_size(12).text_color(t.foreground))))
