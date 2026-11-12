@@ -1,16 +1,17 @@
-// Git panel (like JetBrains' Git log): the commits of the focused project — its branch together with
-// the upstream, so commits not pulled yet (↓ incoming) and not pushed yet (↑ outgoing) show — or all
-// branches. Fetch, Pull (fast-forward, or rebase when that can't) and Push. Click a commit: its full
-// message and changed files; click a file: that commit's diff in the main area (wb-diff).
+// The Log section of the Changes panel (like JetBrains' Git log): the commits of the focused project — its branch
+// together with the upstream, so commits not pulled yet (↓ incoming) and not pushed yet (↑ outgoing) show — or all
+// branches. Fetch, Pull (fast-forward, or rebase when that can't) and Push. Click a commit: its full message and
+// changed files; click a file: that commit's diff in the main area (wb-diff).
 // Runs git on the project's machine; each repo's last log is cached so a project switch shows at once.
+// The main View drives this helper: init(cx), sync(cx) on render, view(t, opts) for the section.
 
-import { View, div, svg } from "gpui-kit";
+import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, run, setShared } from "herdr";
-import * as S from "./section.js";
+import { spaces, panes, focused, exec, appHome, readTextFile, theme, settings, notify, run, shared, setShared, openOverlay } from "herdr";
+
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
-function installed(name, fresh) {
+export function installed(name, fresh) {
   const c = (_soft[name] ??= { ok: true, at: 0 });
   if (!fresh && Date.now() - c.at < 60000) return c.ok;
   c.at = Date.now();
@@ -18,15 +19,40 @@ function installed(name, fresh) {
   return fresh ? p : c.ok; // stale: answer from the cache now, the next call sees the re-read
 }
 
-
-function location() {
+export function location() {
   const space = spaces().find((s) => s.active), f = focused();
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
 }
-// Reads write nothing under .git (no index refresh, no lock): the Changes panel watches it.
-const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+// Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie): the folder watch would see it.
+export const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
+
+// Display prefs shared by the panel and its ⋯ popup (a separate copy): shared "wb.changes.prefs".
+const PREFS = "wb.changes.prefs", AUTHOR = "wb.changes.author";
+export const getPrefs = () => ({ view: "list", scope: "head", logAll: false, logOpen: true, ...(shared(PREFS) ?? {}) });
+export const setPrefs = (patch) => setShared(PREFS, { ...getPrefs(), ...patch });
+export const getAuthor = () => shared(AUTHOR) ?? null;
+export const setAuthor = (name) => setShared(AUTHOR, name);
+
+// File names are colored by status, like JetBrains: kind M modified, A added, U unversioned, D deleted, X conflict.
+const NAME_COLORS = { M: ["#0032A0", "#6897BB"], A: ["#0A7700", "#629755"], U: ["#993300", "#D1675A"], D: ["#6C6C6C", "#6C6C6C"], X: ["#FF0000", "#D5756C"] };
+export const nameColor = (kind) => (NAME_COLORS[kind] ?? NAME_COLORS.M)[settings().dark ? 1 : 0];
+const logKind = (s) => ({ R: "M", C: "M", T: "M", U: "X" })[s] ?? s;
+
+// Parsed exactly like wb-prs does, so the create dialog gets the same repo key.
+export function remoteOf(url) {
+  const m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(url) ?? /^(?:[^@]+@)?([^:/]+):(.+?)(?:\.git)?\/?$/.exec(url);
+  return m ? { host: m[1].toLowerCase(), path: m[2] } : null;
+}
+// After pushing a branch that had no upstream: what the "Create pull request?" hint needs (null: no usable origin).
+export async function prHintFor(root, on) {
+  const [b, u] = await Promise.all([exec("git", [...READ, "rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, on }), exec("git", [...READ, "remote", "get-url", "origin"], { cwd: root, on })]);
+  const remote = u.code === 0 ? remoteOf(u.stdout.trim()) : null;
+  if (!remote || b.code !== 0) return null;
+  return { id: `${on ?? "local"}:${root}`, branch: b.stdout.trim(), repo: { key: `${remote.host}|${remote.path}`, name: remote.path, host: remote.host, path: remote.path, cwd: root, on: on ?? null } };
+}
+
 const SEP = "\x1f", LIMIT = 400, STALE = 30000, FETCH_EVERY = 5 * 60 * 1000;
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -37,21 +63,37 @@ const ago = (s) => {
   return d < 3600 ? `${Math.max(1, Math.round(d / 60))}m` : d < 86400 ? `${Math.round(d / 3600)}h` : d < 86400 * 30 ? `${Math.round(d / 86400)}d`
     : new Date(s * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" });
 };
-const STATUS_COLOR = { A: "ansi2", D: "ansi1", M: "blocked", R: "ansi4" };
 
-export default class GitLog extends View {
-  init(_props, cx) {
-    S.migrateKeys(["sections.collapsed"]);
-    this.repos = {}; // `${on}|${root}` -> { root, on, branch, upstream, ahead, behind, commits, incoming, outgoing, at, error }
+export class Log {
+  // host: { pushed(root, on, cx) } called after a push that created the upstream.
+  constructor(host) { this.host = host; }
+
+  init(cx) {
+    this.repos = {}; // `${on}|${root}` -> { root, on, branch, upstream, ahead, behind, commits, incoming, outgoing, me, at, error }
     this.places = new Map(store.get("places", [])); // `${on}|${cwd}` -> `${on}|${root}` (or "" : not a repo)
     this.loc = null; this.cur = null; this.loading = new Set(); this.busy = null; this.note = null;
-    this.all = store.get("all", false); this.open = null; this.details = {}; this.query = "";
-    this.lastFetch = {};
-    this.search = InputState.new({ placeholder: "Search commits: message, author, hash" });
+    this.open = null; this.details = {}; this.query = ""; this.lastFetch = {}; this.lastAll = getPrefs().logAll;
+    this.search = InputState.new({ placeholder: "Search: message, task, hash" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     this.follow(cx);
     cx.timer.every(2000, (cx) => this.follow(cx)); // a `cd` in a terminal; render catches space switches
     cx.timer.every(60 * 1000, (cx) => { if (this.cur) this.load(this.cur, cx); });
+  }
+
+  current() { return this.cur ? this.repos[this.cur] ?? null : null; }
+
+  // Render must not notify: a space switch or a changed pref is picked up right after this frame.
+  sync(cx) {
+    const loc = location(), all = getPrefs().logAll;
+    const moved = `${loc.on}|${loc.cwd}` !== this.loc, flipped = all !== this.lastAll;
+    if ((moved || flipped) && !this.soon) {
+      this.soon = true;
+      cx.spawn(async (cx) => {
+        this.soon = false;
+        if (all !== this.lastAll) { this.lastAll = all; if (this.cur) this.load(this.cur, cx); }
+        this.follow(cx);
+      });
+    }
   }
 
   // The focused place moved: its repo's cached log at once, then a fresh one (and a quiet fetch now and then).
@@ -62,7 +104,7 @@ export default class GitLog extends View {
     const show = (rk) => {
       this.cur = rk || null;
       if (rk && !this.repos[rk]) { const c = store.get(`log:${rk}`, null); if (c) this.repos[rk] = c; }
-      if (rk && (!this.repos[rk] || Date.now() - (this.repos[rk].at ?? 0) > STALE)) this.load(rk, cx);
+      if (rk && (!this.repos[rk] || this.repos[rk].all !== getPrefs().logAll || Date.now() - (this.repos[rk].at ?? 0) > STALE)) this.load(rk, cx);
       if (rk && Date.now() - (this.lastFetch[rk] ?? 0) > FETCH_EVERY) this.fetch(rk, cx, true);
       cx.notify();
     };
@@ -83,12 +125,12 @@ export default class GitLog extends View {
   load(rk, cx) {
     if (this.loading.has(rk)) return;
     this.loading.add(rk); cx.notify();
-    const all = this.all;
+    const all = getPrefs().logAll;
     cx.spawn(async (cx) => {
       const prev = this.repos[rk] ?? {};
       try {
         const g = (args) => this.git(rk, [...READ, ...args]);
-        const [head, up] = await Promise.all([g(["rev-parse", "--abbrev-ref", "HEAD"]), g(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])]);
+        const [head, up, me] = await Promise.all([g(["rev-parse", "--abbrev-ref", "HEAD"]), g(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), g(["config", "user.name"])]);
         const branch = head.stdout.trim(), upstream = up.code === 0 ? up.stdout.trim() : null;
         let ahead = 0, behind = 0, incoming = [], outgoing = [];
         if (upstream) {
@@ -104,7 +146,7 @@ export default class GitLog extends View {
           const [hash, short, author, at, subject, decor] = l.split(SEP);
           return { hash, short, author, at: Number(at), subject, refs: decor ? decor.split(", ").filter((x) => x && x !== "HEAD") : [], head: /(^|, )HEAD( ->|$|,)/.test(decor) };
         });
-        this.repos[rk] = { branch, upstream, ahead: ahead || 0, behind: behind || 0, commits, incoming, outgoing, all, at: Date.now(), error: null };
+        this.repos[rk] = { branch, upstream, ahead: ahead || 0, behind: behind || 0, commits, incoming, outgoing, all, me: me.code === 0 ? me.stdout.trim() : "", at: Date.now(), error: null };
         store.set(`log:${rk}`, this.repos[rk]);
       } catch (e) { this.repos[rk] = { ...prev, error: String(e.message ?? e) }; }
       finally { this.loading.delete(rk); cx.notify(); }
@@ -112,7 +154,7 @@ export default class GitLog extends View {
   }
 
   // One git action with its progress shown; the log reloads after it.
-  action(rk, label, args, cx, { quiet = false, onFail } = {}) {
+  action(rk, label, args, cx, { quiet = false, onFail, onOk } = {}) {
     if (this.busy) return;
     this.busy = label; if (!quiet) this.note = null; cx.notify();
     cx.spawn(async (cx) => {
@@ -122,6 +164,7 @@ export default class GitLog extends View {
         if (!quiet) this.note = { ok: true, text: `${label}: ${(r.stdout || r.stderr || "done").trim().split("\n").pop()}` };
         // Something that moved HEAD: the Changes panel and the branch chip ask again.
         setShared("wb.branch.switched", Date.now());
+        onOk?.();
       } catch (e) {
         if (onFail) { this.busy = null; onFail(String(e.message ?? e), cx); return; }
         if (!quiet) this.note = { ok: false, text: `${label} failed: ${e.message ?? e}` };
@@ -149,11 +192,9 @@ export default class GitLog extends View {
     });
   }
   push(rk, cx) {
-    const r = this.repos[rk];
-    this.action(rk, "Push", r?.upstream ? ["push"] : ["push", "-u", "origin", "HEAD"], cx);
+    const noUp = !this.repos[rk]?.upstream, { on, root } = this.where(rk);
+    this.action(rk, "Push", noUp ? ["push", "-u", "origin", "HEAD"] : ["push"], cx, { onOk: () => { if (noUp) this.host.pushed(root, on, cx); } });
   }
-
-  setAll(v, cx) { this.all = v; store.set("all", v); if (this.cur) this.load(this.cur, cx); cx.notify(); }
 
   toggle(c, cx) {
     this.open = this.open === c.hash ? null : c.hash;
@@ -220,61 +261,61 @@ export default class GitLog extends View {
         .when(Boolean(d), (e) => e
           .child(h_flex().gap(8).text_size(10.5).text_color(t.dim).child(div().font_family("JetBrains Mono").child(c.short)).child(div().child(`${d.author} · ${d.date}`)))
           .child(div().text_size(12).text_color(t.foreground).child(d.message))
-          .child(v_flex().gap(1).children(d.files.map((f) => h_flex().id(`f-${c.hash}-${f.path}`).h(20).px(4).gap(6).items_center().rounded(4).cursor_pointer()
-            .hover((s) => s.bg(t.hover)).tooltip(f.from ? `${f.from} → ${f.path}` : f.path).on_click(() => this.openFile(c, f))
-            .child(div().w(10).flex_none().text_size(10.5).text_color(t[STATUS_COLOR[f.status]] ?? t.muted).child(f.status))
-            .child(div().flex_1().min_w(0).truncate().text_size(11.5).child(f.path))))))));
+          .child(v_flex().gap(1).children(d.files.map((f) => {
+            const kind = logKind(f.status), parts = f.path.split("/"), name = parts.pop();
+            return h_flex().id(`f-${c.hash}-${f.path}`).h(20).px(4).gap(6).items_center().rounded(4).cursor_pointer()
+              .hover((s) => s.bg(t.hover)).tooltip(f.from ? `${f.from} → ${f.path}` : f.path).on_click(() => this.openFile(c, f))
+              .child(h_flex().flex_1().min_w(0).text_size(11.5)
+                .child(div().min_w(0).truncate().text_color(t.dim).child(parts.length ? parts.join("/") + "/" : ""))
+                .child(div().flex_none().text_color(nameColor(kind)).when(kind === "D", (s) => s.line_through()).child(name)));
+          }))))));
   }
 
-  render(cx) {
-    const t = theme();
-    // A space switch: follow it right after this frame (render itself mustn't notify).
-    const loc = location();
-    if (`${loc.on}|${loc.cwd}` !== this.loc && !this.followSoon) { this.followSoon = true; cx.spawn(async (cx) => { this.followSoon = false; this.follow(cx); }); }
-    const rk = this.cur, r = rk ? this.repos[rk] : null, q = this.query;
+  // o: { open, h (body px), startDrag(e, cx), toggle(cx) }. Collapsed: only the header row.
+  view(t, o) {
+    const rk = this.cur, r = this.current(), q = this.query, sel = getAuthor();
     const busyLoad = rk && this.loading.has(rk);
-    const commits = (r?.commits ?? []).filter((c) => !q || c.subject.toLowerCase().includes(q) || c.author.toLowerCase().includes(q) || c.hash.startsWith(q));
-    const sec = S.sectionOf("wb-git"), ov = S.overlay(sec);
-    const tool = (id, label, tip, act, accent = false, spin = false) => h_flex().id(id).h(24).px(7).gap(4).flex_none().items_center().rounded(6).cursor_pointer()
+    const commits = (r?.commits ?? []).filter((c) => (!q || c.subject.toLowerCase().includes(q) || c.author.toLowerCase().includes(q) || c.hash.startsWith(q)) && (!sel || c.author === sel));
+    const tool = (id, label, tip, act, accent = false, spin = false) => h_flex().id(id).h(22).px(7).gap(4).flex_none().items_center().rounded(6).cursor_pointer()
       .border_1().border_color(accent ? t.accent : t.border).text_size(11).text_color(accent ? t.accent : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .tooltip(tip).on_click((e, cx) => { cx.stop_propagation(); act(e, cx); })
-      .when(spin, (e) => e.child(svg("mods/wb-git/icons/spinner.svg").size(11).spin(900))).child(label);
+      .tooltip(tip).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((e, cx) => { cx.stop_propagation(); act(e, cx); })
+      .when(spin, (e) => e.child(svg("mods/wb-changes/icons/spinner.svg").size(11).spin(900))).child(label);
     const root = rk ? this.where(rk).root : null;
-    return v_flex().id("git-log").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
-      .child(S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
-        .child(S.mark(sec))
-        .child(div().font_semibold().text_size(13).child("Git"))
-        .when(Boolean(r?.branch), (e) => e.child(h_flex().min_w(0).gap(4).items_center().text_size(11).text_color(t.muted)
-          .child(svg("mods/wb-git/icons/git-branch.svg").size(12)).child(div().min_w(0).truncate().child(r.branch))
-          .when(Boolean(r.upstream), (e) => e.child(div().flex_none().text_color(t.dim).child(`→ ${r.upstream}`)))))
-        .child(div().flex_1())
-        .child(h_flex().id("scope").flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().text_size(10)
-          .children([["branch", "Branch", false], ["all", "All", true]].map(([id, label, v]) => div().id(`scope-${id}`).h(20).px(6).flex().items_center().cursor_pointer()
-            .bg(this.all === v ? t.selected : t.background).text_color(this.all === v ? t.foreground : t.muted)
-            .tooltip(v ? "Every branch" : "This branch and its upstream")
-            .on_click((_e, cx) => { cx.stop_propagation(); if (this.all !== v) this.setAll(v, cx); }).child(label))))
-        .child(div().id("refresh").size(24).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted)
-          .hover((s) => s.bg(t.hover)).tooltip("Reload the log").on_click((_e, cx) => { cx.stop_propagation(); if (rk) this.load(rk, cx); })
-          .child(svg("mods/wb-git/refresh.svg").size(14).when(Boolean(busyLoad), (s) => s.spin(900)))))
-      // Fetch / Pull / Push, with what's waiting each way.
-      .when(Boolean(r && !r.error && rk), (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
-        .child(tool("fetch", "Fetch", "git fetch --prune: see what's new upstream", (_e, cx) => this.fetch(rk, cx), false, this.busy === "Fetch"))
-        .child(tool("pull", `Pull${r.behind ? ` ↓${r.behind}` : ""}`, "Fast-forward, or rebase my commits on top when the branches diverged", (_e, cx) => this.pull(rk, cx), r.behind > 0, Boolean(this.busy?.startsWith("Pull"))))
-        .child(tool("push", `Push${r.ahead ? ` ↑${r.ahead}` : ""}`, r.upstream ? `git push to ${r.upstream}` : "No upstream yet: git push -u origin HEAD", (_e, cx) => this.push(rk, cx), r.ahead > 0, this.busy === "Push"))
-        .child(div().flex_1())
-        .child(div().text_size(10.5).text_color(t.dim).child(r.upstream ? (r.behind || r.ahead ? `${r.behind} incoming · ${r.ahead} outgoing` : "up to date") : "no upstream"))))
-      .when(Boolean(this.note), (e) => e.child(div().flex_none().px(10).pt(6).text_size(11).text_color(this.note.ok ? t.dim : t.ansi1).child(this.note.text)))
-      .when(Boolean(r && !r.error), (e) => e.child(div().flex_none().px(8).pt(8)
-        .child(div().id("search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12).text_color(t.foreground)))))
-      .child(div().flex_1().min_h(0).relative()
-        .child(v_flex().id("git-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
-          .when(!rk, (e) => e.child(div().p(8).text_color(t.dim).child(this.places.get(this.loc) === "" ? "Not a git repository" : "Open a project folder")))
-          .when(Boolean(rk && !r), (e) => e.child(div().p(8).text_color(t.dim).child(`Loading ${root?.split("/").pop() ?? ""}…`)))
-          .when(Boolean(r?.error), (e) => e.child(div().p(8).text_color(t.ansi1).child(r.error)))
-          .when(Boolean(r && !r.error && !commits.length), (e) => e.child(div().p(8).text_color(t.dim).child(q ? "No matches" : "No commits")))
-          .children(r && !r.error ? commits.map((c) => this.row(c, r, t)) : []))
-        .child(Scrollbar.vertical("git-list").absolute().inset_0()))
-      .when(Boolean(ov), (e) => e.child(ov));
+    const authors = (() => { const n = new Map(); for (const c of r?.commits ?? []) n.set(c.author, (n.get(c.author) ?? 0) + 1); return [...n].sort((a, b) => b[1] - a[1]).map((a) => a[0]); })();
+    return v_flex().flex_none().border_t(1).border_color(t.border)
+      .when(o.open, (e) => e.child(div().id("log-split").h(8).flex_none().mt(-4).flex().items_center().justify_center().cursor_row_resize().tooltip("Drag to resize the log").hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", (e, cx) => { o.startDrag(e, cx); cx.stop_propagation(); }).child(div().w(36).h(3).rounded(2).bg(t.border))))
+      .child(h_flex().id("log-head").h(30).flex_none().px(10).gap(6).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+        .tooltip(o.open ? "Hide the log" : "Show the log").on_click((_e, cx) => o.toggle(cx))
+        .child(div().w(10).flex_none().text_size(10).text_color(t.muted).child(o.open ? "▾" : "▸"))
+        .child(div().flex_none().font_semibold().text_size(12).child("Log"))
+        .child(h_flex().flex_1().min_w(0).gap(4).items_center().text_size(11).text_color(t.muted)
+          .when(Boolean(r?.branch), (e) => e.child(svg("mods/wb-changes/icons/git-branch.svg").size(12).flex_none()).child(div().min_w(0).truncate().child(r.branch))
+            .when(Boolean(r.upstream), (e) => e.child(div().min_w(0).truncate().text_color(t.dim).child(`→ ${r.upstream}`)))
+            .when(!r.upstream, (e) => e.child(div().flex_none().text_color(t.dim).child("no upstream")))))
+        .when(Boolean(r && !r.error && rk), (e) => e
+          .child(tool("pull", `Pull${r.behind ? ` ↓${r.behind}` : ""}`, "Fast-forward, or rebase my commits on top when the branches diverged", (_e, cx) => this.pull(rk, cx), r.behind > 0, Boolean(this.busy?.startsWith("Pull"))))
+          .child(tool("push", `Push${r.ahead ? ` ↑${r.ahead}` : ""}`, r.upstream ? `git push to ${r.upstream}` : "No upstream yet: git push -u origin HEAD", (_e, cx) => this.push(rk, cx), r.ahead > 0, this.busy === "Push")))
+        .child(div().id("log-reload").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted)
+          .hover((s) => s.bg(t.raised)).tooltip("Reload the log").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); if (rk) this.load(rk, cx); })
+          .child(svg("mods/wb-changes/icons/refresh.svg").size(12).when(Boolean(busyLoad), (s) => s.spin(900)))))
+      .when(o.open, (e) => e.child(v_flex().h(o.h).flex_none().min_h(0)
+        .when(Boolean(this.note), (e) => e.child(div().flex_none().px(10).pb(4).text_size(11).text_color(this.note.ok ? t.dim : t.ansi1).child(this.note.text)))
+        .when(Boolean(r && !r.error), (e) => e.child(h_flex().flex_none().px(8).pb(6).gap(6).items_center()
+          .child(div().id("log-search").flex_1().min_w(0).h(26).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12).text_color(t.foreground)))
+          .child(h_flex().id("log-author").h(26).max_w(130).flex_none().px(8).gap(4).items_center().rounded(7).border_1().border_color(sel ? t.accent : t.border).cursor_pointer()
+            .text_size(11).text_color(sel ? t.accent : t.muted).hover((s) => s.bg(t.hover)).tooltip("Filter by author")
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 230, height: Math.min(320, 26 * (authors.length + 2) + 16), props: { authorMenu: true, authors, me: r?.me ?? "" } }))
+            .child(div().min_w(0).truncate().child(sel ?? "All authors")).child(div().flex_none().text_size(9).child("▾")))))
+        .child(div().flex_1().min_h(0).relative()
+          .child(v_flex().id("log-list").absolute().inset_0().overflow_y_scroll().px(6).pb(6).gap(1)
+            .when(!rk, (e) => e.child(div().p(8).text_color(t.dim).child(this.places.get(this.loc) === "" ? "Not a git repository" : "Open a project folder")))
+            .when(Boolean(rk && !r), (e) => e.child(div().p(8).text_color(t.dim).child(`Loading ${root?.split("/").pop() ?? ""}…`)))
+            .when(Boolean(r?.error), (e) => e.child(div().p(8).text_color(t.ansi1).child(r.error)))
+            .when(Boolean(r && !r.error && !commits.length), (e) => e.child(div().p(8).text_color(t.dim).child(q || sel ? "No matches" : "No commits")))
+            .children(r && !r.error ? commits.map((c) => this.row(c, r, t)) : []))
+          .child(Scrollbar.vertical("log-list").absolute().inset_0()))));
   }
 }

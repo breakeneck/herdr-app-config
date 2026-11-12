@@ -33,8 +33,7 @@ function place(sp, ps) {
     ?? ps.find(p => tabs.has(p.tab) && p.cwd)?.cwd ?? sp?.folder ?? null;
 }
 // Right-panel mods that get a header button while their block sits in the panel's stack: [mod, label, icon].
-const PANELS = [["wb-files", "Files", "mods/wb-tabs/icons/file.svg"], ["wb-changes", "Changes", "mods/wb-tabs/icons/changes.svg"],
-  ["wb-tasks", "Tasks", "mods/wb-tabs/icons/jira.svg"], ["wb-prs", "PR", "mods/wb-tabs/icons/pr.svg"], ["wb-git", "Git", "mods/wb-tabs/icons/git-branch.svg"]];
+const PANELS = [["wb-files", "Files", "mods/wb-tabs/icons/file.svg"], ["wb-changes", "Changes", "mods/wb-tabs/icons/changes.svg"]];
 const PANEL_MODS = new Set(PANELS.map(([mod]) => mod));
 const isPanelBlock = (n) => n.type === "block" && PANEL_MODS.has(n.content?.mod);
 

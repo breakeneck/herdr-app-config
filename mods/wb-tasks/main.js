@@ -167,7 +167,8 @@ const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle:
 
 export default class Jira extends View {
   init(_props, cx) {
-    S.migrateKeys(["sections.collapsed", "tasks.accounts", "tasks.sources"]);
+    this.popup = Boolean(props()?.popup);
+    S.migrateKeys(this.popup ? ["tasks.accounts", "tasks.sources"] : ["sections.collapsed", "tasks.accounts", "tasks.sources"]);
     // Opened as a popup for one issue (click on a row): show it whole, nothing else.
     if (props()?.issue) { this.detailKey = props().issue; this.detailAcc = jiraAccount(props().account); this.loadDetail(cx); return; }
     if (props()?.trelloCard) { this.trello = new Trello(this); this.trello.account = props().account; this.cardPopup = true; this.trello.loadCard(props().trelloCard, cx); return; }
@@ -626,8 +627,8 @@ export default class Jira extends View {
       : q && !groups.some((g) => g.issues.length) && !backlog.length ? "No matches" : !J.count && !J.loading ? "No open issues assigned to you" : null);
     const iconButton = (id, icon, tip, onClick, spin = false) => div().id(id).size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(tip).on_click((e, cx) => { cx.stop_propagation(); onClick(e, cx); }).child(svg(icon).size(14).when(spin, (s) => s.spin(900)));
-    const sec = S.sectionOf("wb-tasks"), ov = S.overlay(sec);
-    return v_flex().id("jira").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
+    const pop = this.popup, sec = pop ? null : S.sectionOf("wb-tasks"), ov = pop ? null : S.overlay(sec);
+    return v_flex().id("jira").size_full().min_h(0).relative().when(!pop, (e) => e.rounded(10).border_1().border_color(t.border)).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(12)
       .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
       // A press on an issue becomes a drag once the pointer moves; the release (here, after a
       // column's own handler) ends it. Leaving the panel cancels.
@@ -648,8 +649,8 @@ export default class Jira extends View {
         this.menu = { key: this.menuKey, x: e.local_position?.x ?? 8, y: e.local_position?.y ?? 8 }; this.menuKey = null;
         cx.stop_propagation(); cx.notify();
       })
-      .child(S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
-        .child(S.mark(sec))
+      .child((pop ? h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border) : S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44))
+        .when(!pop, (e) => e.child(S.mark(sec)))
         // This project's source and account; click: choose another (saved logins, a new one, none).
         .child(h_flex().id("source").flex_none().max_w(190).h(24).px(7).gap(5).items_center().rounded(6).border_1().border_color(t.border).cursor_pointer()
           .bg(mode === "choose" ? t.selected : t.background).hover((s) => s.bg(t.hover)).text_size(11)

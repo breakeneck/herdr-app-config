@@ -1,29 +1,10 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
+import { Log, remoteOf, installed, location, READ, getPrefs, setPrefs, getAuthor, setAuthor, nameColor, prHintFor } from "./log.js";
 import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, NO_TRAILERS, runModel, describe } from "./ai.js";
-// Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
-const _soft = {};
-function installed(name, fresh) {
-  const c = (_soft[name] ??= { ok: true, at: 0 });
-  if (!fresh && Date.now() - c.at < 60000) return c.ok;
-  c.at = Date.now();
-  const p = readTextFile(`${appHome()}/mods/${name}/main.js`).then((r) => (c.ok = r != null), () => (c.ok = false));
-  return fresh ? p : c.ok; // stale: answer from the cache now, the next call sees the re-read
-}
-
-
-function location() {
-  const space = spaces().find((s) => s.active), f = focused();
-  const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
-  const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
-}
 const key = () => JSON.stringify(location());
-// Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
-// the folder watch would see it, and every refresh would start the next one.
-const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 
 // Commit message drafts survive switching windows, spaces and folders: shared "wb.commit.drafts" = { [repoId]: { text, at } },
 // repoId = "<machine|local>:<git toplevel>". A running generation is shared "wb.commit.generating" = { [repoId]: startedAt },
@@ -49,22 +30,35 @@ const storeDraft = (id, text) => {
 
 const ITEM = 22, INDENT = 10; // ITEM: changed-file list row, INDENT: per tree level
 const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
+const LOG_MIN = 80, LOG_MAX = 700; // log body height, px
 // Per-project generation settings (model, language, template) live in shared("wb.ai.project"), edited in the wb-ai window.
 const openGenSettings = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
 const openCommitSettings = (project) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "commit", project, projectName: projectName(project) } });
 
 export default class Changes extends View {
   init(_props, cx) {
+    // Popups (menus) are separate copies: they only draw, the panel copy does all the work.
+    if (props()?.menu || props()?.commitMenu || props()?.viewMenu || props()?.authorMenu) return;
     S.migrateKeys(["sections.collapsed"]);
     migrate();
-    this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
-    try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("scope") === "base") this.scope = "base"; } catch {}
+    this.files = []; this.collapsed = new Set(); this.unchecked = new Map(); this.prHint = null;
+    // view/scope/log prefs live in shared state (the ⋯ popup is another copy); the old per-copy keys are migrated once.
+    // v2: everyone starts on uncommitted changes (what the IDE's Commit window shows), even if an earlier build saved "base".
+    if (!shared("wb.changes.prefs")?.v2) {
+      const patch = { v2: true, scope: "head" };
+      try { if (localStorage.getItem("view") === "tree") patch.view = "tree"; } catch {}
+      setPrefs(patch);
+    }
+    this.scope = getPrefs().scope;
+    this.log = new Log({ pushed: (root, on, cx) => this.showPrHint(root, on, cx) });
+    this.log.init(cx);
+    this.logH = Math.min(LOG_MAX, Math.max(LOG_MIN, Number(localStorage.getItem("logH")) || 240));
     this.message = ""; this.handle = cx.focus_handle(); this.repoId = null; this.lastSet = null; this.draftTimer = null; this.pending = new Map();
     this.input = TextareaState.new({ placeholder: "Commit message" });
     // The box height (px) is a splitter choice: drag the handle above it up to grow it, remembered per person.
     // The textarea is sized by this height, not by rows (a Textarea's layout height is its element's).
     this.commitH = Math.min(COMMIT_MAX, Math.max(COMMIT_MIN, Number(localStorage.getItem("commitH")) || 72));
-    this.splitDrag = null;
+    this.splitDrag = null; // { kind: "commit" | "log", y, h }
     this.input.set_rows(16);
     this.input.on("change", (_e, cx) => {
       const hadMessage = Boolean(this.message.trim());
@@ -128,11 +122,28 @@ export default class Changes extends View {
         let against = head.code === 0 ? "HEAD" : null, base = null;
         // Branch scope: everything since the branch left its base (like a PR), including uncommitted work.
         if (scope === "base" && against) {
-          for (const ref of ["origin/HEAD", "origin/main", "origin/master", "main", "master"]) {
-            const r = await git(["rev-parse", "--abbrev-ref", ref]);
-            if (r.code !== 0) continue;
-            const mb = await git(["merge-base", "HEAD", ref]);
-            if (mb.code === 0) { base = r.stdout.trim(); against = mb.stdout.trim(); break; }
+          // The base is the candidate the branch is closest to (fewest commits ahead), like a PR's target:
+          // the repo's recent MR targets first, then the usual names, then the newest remote branches.
+          let recent = [];
+          try {
+            const o = await git(["remote", "get-url", "origin"]), rm = o.code === 0 ? remoteOf(o.stdout.trim()) : null;
+            if (rm) recent = ((shared("wb.mr.recent") ?? {})[`${rm.host}|${rm.path}`] ?? []).map((b) => `origin/${b}`);
+          } catch {}
+          const [up, cur, newest] = await Promise.all([git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), git(["rev-parse", "--abbrev-ref", "HEAD"]),
+            git(["for-each-ref", "--sort=-committerdate", "--count=10", "--format=%(refname:short)", "refs/remotes/origin"])]);
+          const skip = new Set(["origin", "origin/HEAD", up.code === 0 ? up.stdout.trim() : "", `origin/${cur.stdout.trim()}`]);
+          const cands = [...new Set([...recent, "origin/HEAD", "origin/main", "origin/master", "origin/develop", "origin/dev", "main", "master", ...newest.stdout.split("\n").map((l) => l.trim())])]
+            .filter((c) => c && (c === "origin/HEAD" || !skip.has(c)));
+          const scored = await Promise.all(cands.map(async (ref) => {
+            const [name, n, b] = await Promise.all([git(["rev-parse", "--abbrev-ref", ref]), git(["rev-list", "--count", `${ref}..HEAD`]), git(["rev-list", "--count", `HEAD..${ref}`])]);
+            return name.code === 0 && n.code === 0 ? { name: name.stdout.trim(), n: Number(n.stdout.trim()), behind: Number(b.stdout.trim()) || 0 } : null;
+          }));
+          // Ties: the one with fewer commits of its own (a sibling feature branch cut from the same base loses), then candidate order; origin/HEAD resolves to its target's name, so a duplicate of it ties and loses.
+          let best = null;
+          for (const c of scored) if (c && (!best || c.n < best.n || (c.n === best.n && c.behind < best.behind)) && c.name !== `origin/${cur.stdout.trim()}` && c.name !== (up.stdout.trim() || "\0")) best = c;
+          if (best) {
+            const mb = await git(["merge-base", "HEAD", best.name]);
+            if (mb.code === 0) { base = best.name; against = mb.stdout.trim(); }
           }
         }
         const stats = {};
@@ -164,6 +175,7 @@ export default class Changes extends View {
           files.push({ path, status: s, fresh, ...stat });
         }
         if (stale()) return;
+        if (base && shared("wb.changes.base") !== base) setShared("wb.changes.base", base);
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
         const id = repoIdOf(on, root);
         if (this.repoId !== id) {
@@ -179,6 +191,8 @@ export default class Changes extends View {
         const pk = await projectKey({ cwd: root, on });
         if (stale()) return;
         this.pk = pk;
+        const unc = this.unc(), have = new Set(files.map((f) => f.path));
+        for (const p of unc) if (!have.has(p)) unc.delete(p);
         if (this.open && !files.some((f) => f.path === this.open)) this.open = null;
         // The first changed file is highlighted; its diff itself opens in the main area on click.
         if (!this.open && !this.closed && files.length) this.open = files[0].path;
@@ -188,28 +202,27 @@ export default class Changes extends View {
   }
 
 
-  setView(view, cx) {
-    if (this.view === view) return;
-    this.view = view;
-    try { localStorage.setItem("view", view); } catch {}
+  // Commit selection: paths the person unchecked, per repo, in memory (so new files start checked).
+  unc() { const k = this.repoId ?? ""; if (!this.unchecked.has(k)) this.unchecked.set(k, new Set()); return this.unchecked.get(k); }
+  checkedFiles() { const u = this.unc(); return this.files.filter((f) => !u.has(f.path)); }
+  setChecked(paths, on, cx) {
+    const u = this.unc();
+    for (const p of paths) if (on) u.delete(p); else u.add(p);
     cx.notify();
   }
 
-  setScope(scope, cx) {
-    if (this.scope === scope) return;
-    this.scope = scope;
-    try { localStorage.setItem("scope", scope); } catch {}
-    this.files = []; this.open = null; this.closed = false; this.note = null;
-    this.refresh(cx); cx.notify();
+  // The "Create pull request?" hint after a push that created the upstream.
+  showPrHint(root, on, cx) {
+    if (!installed("wb-prs")) return;
+    cx.spawn(async (cx) => { try { const h = await prHintFor(root, on); if (h) { this.prHint = h; cx.notify(); } } catch {} });
   }
 
-  // Icon toggle group: options are [value, icon in ./icons, tooltip]; `warn` paints that option red.
-  segment(name, current, options, pick, t, warn = null) {
-    return h_flex().flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden()
-      .children(options.map(([v, icon, tip]) => div().id(`${name}-${v}`).w(26).h(20).flex().items_center().justify_center().cursor_pointer().tooltip(tip)
-        .text_color(v === warn ? t.ansi1 : current === v ? t.foreground : t.muted)
-        .when(current === v, (e) => e.bg(t.selected)).when(current !== v, (e) => e.hover((s) => s.bg(t.hover)))
-        .on_click((_e, cx) => { cx.stop_propagation(); pick(v, cx); }).child(svg(`mods/wb-changes/icons/${icon}.svg`).size(13))));
+  // 13px rounded square: state 0 none, 1 all (✓), 2 some (–).
+  checkbox(id, state, t, toggle) {
+    return div().id(id).size(13).flex_none().rounded(3).border_1().flex().items_center().justify_center().cursor_pointer().text_size(9).font_semibold()
+      .border_color(state ? t.accent : t.input).when(state > 0, (e) => e.bg(t.accent).text_color(t.accent_foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); toggle(cx); }).child(state === 1 ? "✓" : state === 2 ? "–" : "");
   }
 
   toggleDir(path, cx) {
@@ -250,9 +263,12 @@ export default class Changes extends View {
   }
 
   dirRow(r, t) {
+    const under = this.files.filter((f) => f.path.startsWith(r.path + "/")), u = this.unc();
+    const n = under.filter((f) => !u.has(f.path)).length, state = n === 0 ? 0 : n === under.length ? 1 : 2;
     return h_flex().id(`dir-${r.path}`).h(ITEM).flex_none().pl(8 + r.depth * INDENT).pr(8).gap(6).items_center().rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleDir(r.path, cx))
       .child(div().w(12).text_size(10).text_color(t.muted).child(r.open ? "▾" : "▸"))
+      .child(this.checkbox(`dcb-${r.path}`, state, t, (cx) => this.setChecked(under.map((f) => f.path), state !== 1, cx)))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.label))
       .child(div().text_size(10).text_color(t.dim).child(String(r.count)));
   }
@@ -286,15 +302,17 @@ export default class Changes extends View {
   generate(cx) {
     if (!this.root || running(this.repoId) || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, id = this.repoId, hasHead = this.hasHead, against = this.against;
+    // Only the checked files are described; all checked: the whole tree.
+    const picked = this.checkedFiles(), only = picked.length < this.files.length ? ["--", ...picked.map((f) => f.path)] : [];
     this.note = null;
     setGenerating(id, true);
     cx.spawn(async (cx) => {
       try {
         const cfg = settingsFor("commit", await projectKey({ cwd: root, on })), model = cfg.model;
-        const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+        const git = (args) => exec("git", ["--literal-pathspecs", ...READ, ...args], { cwd: root, on });
         const [st, df] = await Promise.all([
-          git(["status", "--short"]),
-          git(["diff", ...(hasHead ? [against ?? "HEAD"] : []), "--no-color"]),
+          git(["status", "--short", ...only]),
+          git(["diff", ...(hasHead ? [against ?? "HEAD"] : []), "--no-color", ...only]),
         ]);
         const fresh = (st.stdout || "").split("\n").filter((l) => l.startsWith("?? ")).map((l) => l.slice(3)).slice(0, 20);
         let text = `Git status:\n${st.stdout}\n\nDiff:\n${(df.stdout || "").slice(0, 60000)}`;
@@ -353,12 +371,15 @@ export default class Changes extends View {
   }
 
   commit(cx) {
-    if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== key()) return;
+    if (!this.message.trim() || !this.checkedFiles().length || !this.root || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim(), id = this.repoId, push = commitAction() === "push";
+    // Everything checked: stage all. Otherwise stage and commit just the checked paths (literal, not globs).
+    const picked = this.checkedFiles().map((f) => f.path), partial = picked.length < this.files.length;
     this.busy = true; this.note = null; this.phase = "Committing…";
     cx.spawn(async (cx) => {
       try {
-        for (const args of [["add", "-A"], ["commit", "-m", message]]) {
+        const cmds = partial ? [["--literal-pathspecs", "add", "-A", "--", ...picked], ["--literal-pathspecs", "commit", "-m", message, "--", ...picked]] : [["add", "-A"], ["commit", "-m", message]];
+        for (const args of cmds) {
           const r = await exec("git", args, { cwd: root, on });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         }
@@ -371,6 +392,7 @@ export default class Changes extends View {
           const up = await exec("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: root, on });
           const r = await exec("git", up.code === 0 ? ["push"] : ["push", "-u", "origin", "HEAD"], { cwd: root, on, timeout: 600000 });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+          if (up.code !== 0) this.showPrHint(root, on, cx);
         } catch (e) { if (key() === context) this.note = `Committed, but push failed: ${e}`; }
       }
       this.busy = false; this.refresh(cx); cx.notify();
@@ -380,77 +402,149 @@ export default class Changes extends View {
 
   endSplit() {
     if (!this.splitDrag) return;
+    const kind = this.splitDrag.kind;
     this.splitDrag = null;
-    try { localStorage.setItem("commitH", String(this.commitH)); } catch {}
+    try { localStorage.setItem(kind === "log" ? "logH" : "commitH", String(kind === "log" ? this.logH : this.commitH)); } catch {}
+  }
+
+  // The ⋯ dropdown: every display pref, checkmarked (shared prefs; the panel copy reacts).
+  viewMenuView() {
+    const t = theme(), p = getPrefs();
+    const item = (id, label, on, pick) => h_flex().id(id).h(28).px(10).gap(8).items_center().rounded(6).cursor_pointer().text_size(12.5).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click(() => { pick(); closeOverlay(props()?.overlay); })
+      .child(div().w(14).text_size(12).text_color(t.accent).child(on ? "✓" : "")).child(label);
+    const line = () => div().h(1).my(3).bg(t.border);
+    return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
+      .child(item("vm-head", "Uncommitted changes", p.scope === "head", () => setPrefs({ scope: "head" })))
+      .child(item("vm-base", (shared("wb.changes.base") ? `Branch changes vs ${shared("wb.changes.base").replace(/^origin\//, "")}` : "Branch changes vs base"), p.scope === "base", () => setPrefs({ scope: "base" })))
+      .child(line())
+      .child(item("vm-list", "List", p.view === "list", () => setPrefs({ view: "list" })))
+      .child(item("vm-tree", "Tree", p.view === "tree", () => setPrefs({ view: "tree" })))
+      .child(line())
+      .child(item("vm-branch", "Log: this branch", !p.logAll, () => setPrefs({ logAll: false })))
+      .child(item("vm-all", "Log: all branches", p.logAll, () => setPrefs({ logAll: true })))
+      .child(line())
+      .child(item("vm-log", "Show log", p.logOpen, () => setPrefs({ logOpen: !p.logOpen })));
+  }
+
+  // The author filter's list: All, me, then the log's authors by commit count.
+  authorMenuView() {
+    const t = theme(), cur = getAuthor(), { authors = [], me = "" } = props() ?? {};
+    const item = (id, label, name, hint) => h_flex().id(id).h(26).px(8).gap(6).items_center().rounded(5).cursor_pointer().flex_none().text_size(12).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click(() => { setAuthor(name); closeOverlay(props()?.overlay); })
+      .child(div().w(12).text_size(12).text_color(t.accent).child(cur === name ? "✓" : "")).child(div().flex_1().min_w(0).truncate().child(label))
+      .when(Boolean(hint), (e) => e.child(div().text_size(10.5).text_color(t.dim).child(hint)));
+    return v_flex().id("author-menu").p(6).gap(1).w_full().h_full().overflow_y_scroll().bg(t.raised).text_color(t.foreground)
+      .child(item("au-all", "All authors", null))
+      .when(Boolean(me), (e) => e.child(item("au-me", "Me", me, me)))
+      .children(authors.map((a, i) => item(`au-${i}`, a, a)));
   }
 
   render(cx) {
     if (props()?.menu) return this.menuView();
     if (props()?.commitMenu) return this.commitMenuView();
+    if (props()?.viewMenu) return this.viewMenuView();
+    if (props()?.authorMenu) return this.authorMenuView();
     if (key() !== this.context) this.refresh(cx);
+    // Prefs changed in the ⋯ popup: a new scope reloads the list (the log follows its own pref in log.sync).
+    const pr = getPrefs();
+    this.view = pr.view;
+    if (pr.scope !== this.scope) { this.scope = pr.scope; this.files = []; this.open = null; this.closed = false; this.note = null; this.refresh(cx); }
+    this.log.sync(cx);
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
-    const rows = this.listRows(), tree = this.view === "tree";
-    const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
+    const rows = this.listRows(), tree = this.view === "tree", unc = this.unc();
+    const nChecked = this.files.filter((f) => !unc.has(f.path)).length, total = this.files.length, allState = nChecked === 0 ? 0 : nChecked === total ? 1 : 2;
+    const enabled = Boolean(this.message.trim() && nChecked && this.root && !this.busy && !this.loading);
     const generating = running(this.repoId);
     const genEnabled = Boolean(this.root && !generating && !this.busy && !this.loading && this.context === key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     const sec = S.sectionOf("wb-changes"), ov = S.overlay(sec);
+    const lr = this.log.current(), fetching = this.log.busy === "Fetch";
+    // The hint goes away when the repo or branch it was for is no longer the one shown.
+    if (this.prHint && (this.prHint.id !== this.repoId || (lr?.branch && lr.branch !== this.prHint.branch))) this.prHint = null;
+    const hint = this.prHint;
+    const hbtn = (id, label, tip, icon, act, extra = null) => h_flex().id(id).h(22).px(7).gap(4).flex_none().items_center().rounded(6).cursor_pointer().border_1().border_color(t.border)
+      .text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); act(cx); })
+      .child(icon).child(label).when(Boolean(extra), (e) => e.child(extra));
+    const popup = (mod, width) => () => openOverlay({ mod, kind: "popup", width, height: 620, props: { popup: true } });
     return v_flex().id("changes").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); return; }
       })
-      // The commit-box splitter: the handle grabs, the panel tracks the drag even outside it.
+      // The splitters (commit box, log): the handle grabs, the panel tracks the drag even outside it.
       .on_mouse_move((e, cx) => {
-        if (!this.splitDrag) return;
-        const z = settings().zoom || 1;
-        // The handle sits above the box: dragging up grows it.
-        const h = Math.round(Math.max(COMMIT_MIN, Math.min(COMMIT_MAX, this.splitDrag.h - (e.position.y - this.splitDrag.y) / z)));
-        if (h !== this.commitH) { this.commitH = h; cx.notify(); }
+        const d = this.splitDrag;
+        if (!d) return;
+        const z = settings().zoom || 1, log = d.kind === "log", lo = log ? LOG_MIN : COMMIT_MIN, hi = log ? LOG_MAX : COMMIT_MAX;
+        // The handle sits above what it sizes: dragging up grows it.
+        const h = Math.round(Math.max(lo, Math.min(hi, d.h - (e.position.y - d.y) / z)));
+        if (h !== (log ? this.logH : this.commitH)) { if (log) this.logH = h; else this.commitH = h; cx.notify(); }
       })
       .on_mouse_up("left", () => this.endSplit())
       .on_hover((hovered) => { if (!hovered) this.endSplit(); })
-      .child(S.header(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border), sec, 44)
+      .child(S.header(h_flex().h(42).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
         .child(S.mark(sec))
         .child(div().font_semibold().child("Changes"))
-        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
+        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).flex_none().child(nChecked < total ? `${nChecked} of ${total} files` : `${total} files`))
+        .when(installed("wb-tasks"), (e) => e.child(hbtn("open-tasks", "Tasks", "Tasks", svg("mods/wb-changes/icons/jira.svg").size(12), popup("wb-tasks", 440))))
+        .when(installed("wb-prs"), (e) => e.child(hbtn("open-prs", "PR", "Pull requests", svg("mods/wb-changes/icons/pr.svg").size(12), popup("wb-prs", 460))))
         .child(div().flex_1())
-        .child(this.segment("scope", this.scope, [["head", "uncommitted", "Uncommitted changes"],
-          ["base", "branch", this.base ? `Branch changes vs ${this.base} (incl. uncommitted)` : noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "Branch changes vs base"]],
-          (v, cx) => this.setScope(v, cx), t, noBase ? "base" : null))
-        .child(this.segment("view", this.view, [["list", "list", "List"], ["tree", "tree", "Tree"]], (v, cx) => this.setView(v, cx), t))
-        .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
+        .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`))
+        .child(hbtn("fetch", "", "git fetch --prune: see what's new upstream", fetching ? svg("mods/wb-changes/icons/spinner.svg").size(12).spin(900) : svg("mods/wb-changes/icons/refresh.svg").size(12),
+          (cx) => { if (this.log.cur) this.log.fetch(this.log.cur, cx); }, lr?.behind ? div().text_color(t.accent).child(`↓${lr.behind}`) : null))
+        .child(div().id("view-menu").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 220, height: 250, props: { viewMenu: true } })).child("⋯")))
+      .when(total > 0, (e) => e.child(h_flex().h(26).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(this.checkbox("cb-all", allState, t, (cx) => this.setChecked(this.files.map((f) => f.path), allState !== 1, cx)))
+        .child(div().text_size(11).text_color(t.dim).child(this.base && this.scope === "base" ? `Changes vs ${this.base}` : "Select all"))))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
-      .child(div().flex_1().min_h(44).relative().border_b(1).border_color(t.border)
+      .child(div().flex_1().min_h(44).relative()
         .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().p(6).children(rows.map((r) => {
         if (r.dir) return this.dirRow(r, t);
         const f = r.file, parts = tree ? [] : f.path.split("/"), name = tree ? r.name : parts.pop();
-        return h_flex().id(`change-${f.path}`).h(ITEM).flex_none().px(8).pl(tree ? 8 + r.depth * INDENT + 18 : 8).gap(4).items_center().rounded(5).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
-          .child(div().w(10).flex_none().text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
-          .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
+        const kind = f.status === "U" ? "X" : f.fresh ? "U" : f.status;
+        return h_flex().id(`change-${f.path}`).h(ITEM).flex_none().px(8).pl(tree ? 8 + r.depth * INDENT + 18 : 8).gap(6).items_center().rounded(5).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
+          .child(this.checkbox(`cb-${f.path}`, unc.has(f.path) ? 0 : 1, t, (cx) => this.setChecked([f.path], unc.has(f.path), cx)))
+          .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().text_color(nameColor(kind)).when(kind === "D", (s) => s.line_through()).child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? (this.base ? `No changes since ${this.base}` : "No uncommitted changes") : "No folder")))))
         .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
-            .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
+      .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
       // Explicit height: the layout under-measures the Textarea inside, which pushed the buttons off the bottom.
-      // 10+10 padding, 8 handle, 8+8 gaps, 30 buttons, 1 border.
-      .child(v_flex().flex_none().h(this.commitH + 75).overflow_hidden().p(10).gap(8).border_t(1).border_color(t.border)
+      // 10+10 padding, 8 handle, 8+8 gaps, 30 buttons, 1 border (+ 26 and a gap for the PR hint).
+      .child(v_flex().flex_none().h(this.commitH + 75 + (hint ? 34 : 0)).overflow_hidden().p(10).gap(8).border_t(1).border_color(t.border)
         .child(div().id("commit-split").h(12).flex_none().ml(-10).mr(-10).mt(-4).flex().items_center().justify_center().cursor_row_resize().tooltip("Drag to resize the message box").hover((s) => s.bg(t.hover))
-          .on_mouse_down("left", (e, cx) => { this.splitDrag = { y: e.position.y, h: this.commitH }; cx.stop_propagation(); })
+          .on_mouse_down("left", (e, cx) => { this.splitDrag = { kind: "commit", y: e.position.y, h: this.commitH }; cx.stop_propagation(); })
           .child(div().w(36).h(4).rounded(2).bg(t.border)))
         .child(div().id("commit-message").w_full().h(this.commitH).flex_none().overflow_hidden().px(10).py(6).rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.input).w_full().h(this.commitH - 14).text_size(12).text_color(t.foreground)))
+        .when(Boolean(hint), (e) => e.child(h_flex().h(26).flex_none().rounded(8).border_1().border_color(t.accent).bg(t.selected).items_center().overflow_hidden()
+          .child(h_flex().id("pr-hint").flex_1().min_w(0).h_full().px(10).items_center().cursor_pointer().text_size(11.5).text_color(t.accent).hover((s) => s.bg(t.hover)).tooltip("Open the pull request dialog")
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => {
+              const h = this.prHint; if (!h) return;
+              this.prHint = null; cx.notify();
+              openOverlay({ mod: "wb-prs", kind: "dialog", modal: true, width: 620, height: 0.85, props: { create: { repo: h.repo } } });
+            }).child(div().truncate().child(`Pushed ${hint?.branch} · Create pull request?`)))
+          .child(div().id("pr-hint-x").w(26).h_full().flex().items_center().justify_center().cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Dismiss")
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { this.prHint = null; cx.notify(); }).child("✕"))))
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
-            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
+            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the ${nChecked < total ? "checked files' " : ""}diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
               .child(generating ? svg("mods/wb-changes/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/wb-changes/icons/layers.svg").size(12))
               .child(generating ? "Generating…" : "Generate"))
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 130, props: { menu: true, project: this.pk } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           .child(h_flex().id("commit").h(30).flex_none().rounded(8).overflow_hidden().bg(enabled ? t.solid : t.raised)
             .child(h_flex().id("commit-run").px(14).h_full().items_center().text_size(12).text_color(enabled ? t.solid_foreground : t.dim).when(enabled, (e) => e.cursor_pointer()).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.commit(cx))
-              .tooltip(commitAction() === "push" ? "Stage everything, commit with this message, then push (sets origin upstream if the branch has none)" : "Stage everything and commit with this message")
+              .tooltip((commitAction() === "push" ? "Commit the checked files with this message, then push (sets origin upstream if the branch has none)" : "Commit the checked files with this message") + (nChecked ? "" : " · nothing checked"))
               .child(this.busy ? (this.phase ?? "Committing…") : commitAction() === "push" ? "Commit and Push" : "Commit"))
             .child(div().id("commit-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(enabled ? t.solid_foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Commit or Commit and Push").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 190, height: 74, props: { commitMenu: true } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))))
+      .child(this.log.view(t, { open: pr.logOpen, h: this.logH, startDrag: (e) => { this.splitDrag = { kind: "log", y: e.position.y, h: this.logH }; }, toggle: () => setPrefs({ logOpen: !pr.logOpen }) }))
       .when(Boolean(ov), (e) => e.child(ov));
   }
 }

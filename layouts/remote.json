@@ -159,27 +159,6 @@
                       "content": {
                         "mod": "wb-changes"
                       }
-                    },
-                    {
-                      "id": "jira",
-                      "type": "block",
-                      "content": {
-                        "mod": "wb-tasks"
-                      }
-                    },
-                    {
-                      "id": "prs",
-                      "type": "block",
-                      "content": {
-                        "mod": "wb-prs"
-                      }
-                    },
-                    {
-                      "id": "git",
-                      "type": "block",
-                      "content": {
-                        "mod": "wb-git"
-                      }
                     }
                   ],
                   "active": "changes"
@@ -204,6 +183,20 @@
           },
           "size": {
             "px": 28
+          }
+        },
+        {
+          "id": "prs-host",
+          "type": "block",
+          "size": {
+            "px": 0
+          },
+          "min": 0,
+          "content": {
+            "mod": "wb-prs",
+            "props": {
+              "host": true
+            }
           }
         }
       ],

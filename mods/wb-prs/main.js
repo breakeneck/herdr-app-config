@@ -110,7 +110,10 @@ const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle:
 
 export default class Prs extends View {
   init(_props, cx) {
-    S.migrateKeys(["sections.collapsed"]);
+    // Host: a zero-size block in the layout that only runs the queued background jobs (a popup's tasks die with it).
+    if (props()?.host) { cx.timer.every(1000, (cx) => this.runQueued(cx)); return; }
+    this.popup = Boolean(props()?.popup);
+    if (!this.popup) S.migrateKeys(["sections.collapsed"]);
     migrate();
     // Opened as a popup for one PR/MR (click on a row): its description, comments and approvals.
     if (props()?.create) {
@@ -129,8 +132,7 @@ export default class Prs extends View {
       cx.timer.every(500, (cx) => { if (this.takeReview()) cx.notify(); });
       this.loadDetail(cx); return;
     }
-    // Long-lived jobs queued by this panel's dialogs (MR descriptions, PR reviews): run here, since a closed overlay's tasks are cancelled.
-    cx.timer.every(1000, (cx) => this.runQueued(cx));
+    // Long-lived jobs queued by the dialogs (MR descriptions, PR reviews) run in the host block (props.host), not here.
     this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = ""; this.started = Date.now();
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
@@ -511,6 +513,7 @@ export default class Prs extends View {
       const r = await this.repoOf(loc);
       if (!r.host || !loc.cwd) { notify({ title: "No git remote (origin) in this folder", level: "error" }); return; }
       openOverlay({ mod: "wb-prs", kind: "dialog", modal: true, width: 620, height: 0.85, props: { create: { repo: { ...r, ...loc } } } });
+      if (this.popup) closeOverlay(props()?.overlay);
     });
   }
 
@@ -570,7 +573,7 @@ export default class Prs extends View {
       .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}`)
       .when(this.menu?.pr?.url === pr.url, (s) => s.bg(t.selected))
       // Click: the whole PR/MR in a popup; right-click: its menu (placed by the panel's handler).
-      .on_click(() => openOverlay({ mod: "wb-prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }))
+      .on_click(() => { openOverlay({ mod: "wb-prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }); if (this.popup) closeOverlay(props()?.overlay); })
       .on_mouse_down("right", () => { this.menuPr = pr; })
       .child(h_flex().gap(6).items_center()
         .child(div().flex_none().size(7).rounded(4).bg(dot ?? t.border))
@@ -613,6 +616,7 @@ export default class Prs extends View {
   }
 
   render(cx) {
+    if (props()?.host) return div().w(0).h(0);
     if (this.creating) return this.creating.render(theme());
     if (this.detailPr) return this.detailView(theme());
     this.follow(cx);
@@ -624,16 +628,16 @@ export default class Prs extends View {
     const refresh = div().id("refresh").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => { cx.stop_propagation(); this.poll(cx); })
       .child(svg("mods/wb-prs/refresh.svg").size(14).when(busy, (s) => s.spin(900)));
-    const sec = S.sectionOf("wb-prs"), ov = S.overlay(sec);
+    const pop = this.popup, sec = pop ? null : S.sectionOf("wb-prs"), ov = pop ? null : S.overlay(sec);
     return v_flex().id("prs").size_full().min_h(0).relative()
       .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
       .on_mouse_down("right", (e, cx) => {
         if (!this.menuPr) return;
         this.menu = { pr: this.menuPr, x: e.local_position?.x ?? 8, y: e.local_position?.y ?? 8 }; this.menuPr = null;
         cx.stop_propagation(); cx.notify();
-      }).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
-      .child(S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
-        .child(S.mark(sec))
+      }).when(!pop, (e) => e.rounded(10).border_1().border_color(t.border)).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(12)
+      .child((pop ? h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border) : S.header(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border), sec, 44))
+        .when(!pop, (e) => e.child(S.mark(sec)))
         .child(div().font_semibold().text_size(13).child(this.provider === "gitlab" ? "Merge requests" : "Pull requests"))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(String(this.prs.length)))
         .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.dim).child(this.repo))
