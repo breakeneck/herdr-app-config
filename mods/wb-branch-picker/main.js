@@ -198,7 +198,7 @@ export default class BranchPicker extends View {
         .when(on, el => el.bg(t.selected))
         .when(!on, el => el.hover(s => s.bg(t.hover)))
         .tooltip(r.b.name)
-        .on_click(() => this.pick(r.b, cx))
+        .on_click((_e, cx) => this.pick(r.b, cx))
         .child(svg(`mods/wb-branch-picker/icons/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
         .child(div().flex_1().min_w(0).truncate().text_color(cur ? t.foreground : t.muted).child(r.rest ?? r.b.name))
         .when(cur, el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("current")))

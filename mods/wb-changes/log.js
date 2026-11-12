@@ -1,6 +1,6 @@
 // The Log section of the Changes panel (like JetBrains' Git log): the commits of the focused project — its branch
 // together with the upstream, so commits not pulled yet (↓ incoming) and not pushed yet (↑ outgoing) show — or all
-// branches. Fetch, Pull (fast-forward, or rebase when that can't) and Push. Click a commit: its full message and
+// branches. Fetch (pushing is the Commit and Push button above). Click a commit: its full message and
 // changed files; click a file: that commit's diff in the main area (wb-diff).
 // Runs git on the project's machine; each repo's last log is cached so a project switch shows at once.
 // The main View drives this helper: init(cx), sync(cx) on render, view(t, opts) for the section.
@@ -89,13 +89,13 @@ export class Log {
   init(cx) {
     this.repos = {}; // `${on}|${root}` -> { root, on, branch, upstream, ahead, behind, commits, incoming, outgoing, me, at, error }
     this.places = new Map(store.get("places", [])); // `${on}|${cwd}` -> `${on}|${root}` (or "" : not a repo)
-    this.loc = null; this.cur = null; this.loading = new Set(); this.busy = null; this.note = null;
+    this.loc = null; this.cur = null; this.loading = new Set(); this.spinning = new Set(); this.busy = null; this.note = null;
     this.open = null; this.details = {}; this.query = ""; this.lastFetch = {}; this.lastAll = getPrefs().logAll;
     this.search = InputState.new({ placeholder: "Search: message, task, hash" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     this.follow(cx);
     cx.timer.every(2000, (cx) => this.follow(cx)); // a `cd` in a terminal; render catches space switches
-    cx.timer.every(60 * 1000, (cx) => { if (this.cur) this.load(this.cur, cx); });
+    cx.timer.every(60 * 1000, (cx) => { if (this.cur) this.load(this.cur, cx, true); });
   }
 
   current() { return this.cur ? this.repos[this.cur] ?? null : null; }
@@ -122,7 +122,7 @@ export class Log {
     const show = (rk) => {
       this.cur = rk || null;
       if (rk && !this.repos[rk]) { const c = store.get(`log:${rk}`, null); if (c) this.repos[rk] = c; }
-      if (rk && (!this.repos[rk] || this.repos[rk].all !== getPrefs().logAll || Date.now() - (this.repos[rk].at ?? 0) > STALE)) this.load(rk, cx);
+      if (rk && (!this.repos[rk] || this.repos[rk].all !== getPrefs().logAll || Date.now() - (this.repos[rk].at ?? 0) > STALE)) this.load(rk, cx, Boolean(this.repos[rk]));
       if (rk && Date.now() - (this.lastFetch[rk] ?? 0) > FETCH_EVERY) this.fetch(rk, cx, true);
       cx.notify();
     };
@@ -140,9 +140,11 @@ export class Log {
   git(rk, args, opts = {}) { const { on, root } = this.where(rk); return exec("git", args, { cwd: root, on, ...opts }); }
 
   // Branch, upstream, ahead/behind and the log; incoming = in the upstream, not here; outgoing = the other way.
-  load(rk, cx) {
+  // quiet: a background refresh (timer, a project switch with a cached log): no spinner.
+  load(rk, cx, quiet = false) {
+    if (!quiet) { this.spinning.add(rk); cx.notify(); }
     if (this.loading.has(rk)) return;
-    this.loading.add(rk); cx.notify();
+    this.loading.add(rk);
     const all = getPrefs().logAll;
     cx.spawn(async (cx) => {
       const prev = this.repos[rk] ?? {};
@@ -167,14 +169,16 @@ export class Log {
         this.repos[rk] = { branch, upstream, ahead: ahead || 0, behind: behind || 0, commits, incoming, outgoing, all, me: me.code === 0 ? me.stdout.trim() : "", at: Date.now(), error: null };
         store.set(`log:${rk}`, this.repos[rk]);
       } catch (e) { this.repos[rk] = { ...prev, error: String(e.message ?? e) }; }
-      finally { this.loading.delete(rk); cx.notify(); }
+      finally { this.loading.delete(rk); this.spinning.delete(rk); cx.notify(); }
     });
   }
 
   // One git action with its progress shown; the log reloads after it.
   action(rk, label, args, cx, { quiet = false, onFail, onOk } = {}) {
     if (this.busy) return;
-    this.busy = label; if (!quiet) this.note = null; cx.notify();
+    // A quiet action (the periodic fetch) holds busy under its own name, so no button spins for it.
+    const mark = quiet ? `auto:${label}` : label;
+    this.busy = mark; if (!quiet) this.note = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
         const r = await this.git(rk, args, { timeout: 180000 });
@@ -187,36 +191,13 @@ export class Log {
         if (onFail) { this.busy = null; onFail(String(e.message ?? e), cx); return; }
         if (!quiet) this.note = { ok: false, text: `${label} failed: ${e.message ?? e}` };
       } finally {
-        if (this.busy === label) this.busy = null;
-        this.load(rk, cx); cx.notify();
+        if (this.busy === mark) this.busy = null;
+        this.load(rk, cx, quiet); cx.notify();
       }
     });
   }
 
   fetch(rk, cx, quiet = false) { this.lastFetch[rk] = Date.now(); this.action(rk, "Fetch", ["fetch", "--prune", "--quiet"], cx, { quiet }); }
-  // Pull: fast-forward when it can; when the branches diverged, rebase the local commits on top (like
-  // "Update Project → Rebase"); if that stops on a conflict, it is aborted and said so.
-  pull(rk, cx) {
-    this.action(rk, "Pull", ["pull", "--ff-only"], cx, {
-      onFail: (msg, cx) => {
-        if (!/not possible to fast-forward|diverg/i.test(msg)) { this.note = { ok: false, text: `Pull failed: ${msg}` }; cx.notify(); return; }
-        this.action(rk, "Pull (rebase)", ["pull", "--rebase", "--autostash"], cx, {
-          onFail: (m2, cx) => {
-            this.note = { ok: false, text: `Pull (rebase) stopped: ${m2} · rebase aborted, nothing changed` };
-            this.git(rk, ["rebase", "--abort"]).finally(() => { this.load(rk, cx); cx.notify(); });
-          },
-        });
-      },
-    });
-  }
-  push(rk, cx) {
-    const { on, root } = this.where(rk);
-    cx.spawn(async (cx) => {
-      let plan;
-      try { plan = await pushPlan(root, on); } catch (e) { this.note = { ok: false, text: `Push failed: ${e.message ?? e}` }; cx.notify(); return; }
-      this.action(rk, "Push", plan.args, cx, { onOk: () => { if (plan.fresh) this.host.pushed(root, on, cx); } });
-    });
-  }
 
   toggle(c, cx) {
     this.open = this.open === c.hash ? null : c.hash;
@@ -296,7 +277,7 @@ export class Log {
   // o: { open, h (body px), startDrag(e, cx), toggle(cx) }. Collapsed: only the header row.
   view(t, o) {
     const rk = this.cur, r = this.current(), q = this.query, sel = getAuthor();
-    const busyLoad = rk && this.loading.has(rk);
+    const busyLoad = rk && this.spinning.has(rk);
     const commits = (r?.commits ?? []).filter((c) => (!q || c.subject.toLowerCase().includes(q) || c.author.toLowerCase().includes(q) || c.hash.startsWith(q)) && (!sel || c.author === sel));
     const tool = (id, label, tip, act, accent = false, spin = false) => h_flex().id(id).h(22).px(7).gap(4).flex_none().items_center().rounded(6).cursor_pointer()
       .border_1().border_color(accent ? t.accent : t.border).text_size(11).text_color(accent ? t.accent : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -316,8 +297,7 @@ export class Log {
             .when(Boolean(r.upstream), (e) => e.child(div().min_w(0).truncate().text_color(t.dim).child(`→ ${r.upstream}`)))
             .when(!r.upstream, (e) => e.child(div().flex_none().text_color(t.dim).child("no upstream")))))
         .when(Boolean(r && !r.error && rk), (e) => e
-          .child(tool("pull", `Pull${r.behind ? ` ↓${r.behind}` : ""}`, "Fast-forward, or rebase my commits on top when the branches diverged", (_e, cx) => this.pull(rk, cx), r.behind > 0, Boolean(this.busy?.startsWith("Pull"))))
-          .child(tool("push", `Push${r.ahead ? ` ↑${r.ahead}` : ""}`, "Push to the same-named branch on origin (created and tracked if it isn't there yet)", (_e, cx) => this.push(rk, cx), r.ahead > 0, this.busy === "Push")))
+          .child(tool("fetch", `Fetch${r.behind ? ` ↓${r.behind}` : ""}`, "git fetch --prune: see what's new upstream (nothing in your working tree changes)", (_e, cx) => this.fetch(rk, cx), r.behind > 0, this.busy === "Fetch")))
         .child(div().id("log-reload").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted)
           .hover((s) => s.bg(t.raised)).tooltip("Reload the log").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); if (rk) this.load(rk, cx); })
           .child(svg("mods/wb-changes/icons/refresh.svg").size(12).when(Boolean(busyLoad), (s) => s.spin(900)))))
