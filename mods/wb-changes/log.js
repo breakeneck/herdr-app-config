@@ -23,7 +23,10 @@ export function location() {
   const space = spaces().find((s) => s.active), f = focused();
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+  return { cwd: pane?.cwd || f?.cwd
+    // A mod pane (a file or diff tab) has no folder: the space's terminal one (shown tab first), so panels stay on the project.
+    || panes().find((p) => p.cwd && p.tab === space?.tabs?.find((t) => t.active)?.id)?.cwd
+    || panes().find((p) => p.cwd && space?.tabs?.some((t) => t.id === p.tab))?.cwd || space?.folder, on };
 }
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie): the folder watch would see it.
 export const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];

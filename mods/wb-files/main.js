@@ -1,7 +1,7 @@
-// A lazy file browser for the focused pane's folder, with bounded read-only previews.
+// A lazy file browser for the focused pane's folder; a clicked file opens read-only in the main area (props.view: that viewer tab).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, shared } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, shared, setShared, props, run } from "herdr";
 import * as S from "./section.js";
 import { colorOf } from "./colors.js";
 
@@ -10,7 +10,10 @@ function location() {
   const space = spaces().find(s => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+  return { cwd: pane?.cwd || f?.cwd
+    // A mod pane (a file or diff tab) has no folder: the space's terminal one (shown tab first), so panels stay on the project.
+    || panes().find((p) => p.cwd && p.tab === space?.tabs?.find((t) => t.active)?.id)?.cwd
+    || panes().find((p) => p.cwd && space?.tabs?.some((t) => t.id === p.tab))?.cwd || space?.folder, on, space: space?.id };
 }
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
@@ -41,8 +44,23 @@ async function directory(path, on) {
   return out;
 }
 
+// A clicked file opens in the main area as a tab (one viewer tab per space, reused: a new click sends it
+// a request through shared state, like the diff tab). The viewer is this mod with props.view.
+const REQUEST = "wb.files.request";
+function openInMain(root, on, path) {
+  const space = spaces().find((s) => s.active);
+  const req = { view: true, space: space?.id ?? null, root, on: on ?? null, path, ts: Date.now() };
+  const ids = new Set((space?.tabs ?? []).map((t) => t.id));
+  const existing = panes().find((p) => p.mod === "wb-files" && ids.has(p.tab));
+  setShared(REQUEST, req);
+  const name = path.split("/").pop();
+  if (existing) { run("tab.select", { id: existing.tab }); run("tab.rename", { id: existing.tab, name }); }
+  else run("tab.new", { name, mod: "wb-files", props: req, space: space?.id ?? undefined });
+}
+
 export default class Files extends View {
   init(_props, cx) {
+    if (props()?.view) { this.viewer = true; this.req = props(); this.root = this.req.root; this.on = this.req.on; this.show(this.req.path, cx); return; }
     S.migrateKeys(["sections.collapsed"]);
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
@@ -76,12 +94,11 @@ export default class Files extends View {
   refresh(cx) {
     const { cwd, on } = location(), next = key();
     if (next !== this.context?.key) {
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
+      if (this.context) this.saved.set(this.context.key, { folders: this.folders });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.pending = new Set(); this.marks = {}; this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
-      if (saved?.file) this.show(saved.file, cx);
     }
     if (!cwd || this.loading) return;
     const context = this.context;
@@ -138,7 +155,7 @@ export default class Files extends View {
     cx.spawn(async cx => {
       try {
         const text = await readTextFile(`${root}/${path}`, { on });
-        if (this.file !== path || !this.current(context)) return;
+        if (this.file !== path || (!this.viewer && !this.current(context))) return;
         if (text === null) { this.fileError = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
@@ -146,7 +163,7 @@ export default class Files extends View {
           value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
           font_family: settings().font_family, font_size: 12,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
-      } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
+      } catch { if (this.file === path && (this.viewer || this.current(context))) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
       finally { cx.notify(); }
     });
   }
@@ -157,7 +174,7 @@ export default class Files extends View {
       if (out.length >= TOTAL) break;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
+        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : openInMain(this.root, this.on, path))
         .child(entry.dir ? svg(`mods/wb-files/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/wb-files/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
@@ -167,7 +184,22 @@ export default class Files extends View {
     return out;
   }
 
+  // The viewer tab: the requested file, full size; a newer request for this space replaces it.
+  viewerView(cx) {
+    const r = shared(REQUEST), t = theme();
+    if (r && r.ts > (this.req.ts ?? 0) && (r.space == null || r.space === this.req.space)) {
+      this.req = r; this.root = r.root; this.on = r.on; this.show(r.path, cx);
+    }
+    return v_flex().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(h_flex().h(30).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(svg("mods/wb-files/file.svg").size(13).flex_none().text_color(t.muted))
+        .child(div().flex_none().font_semibold().child(this.file?.split("/").pop() ?? ""))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.file ?? "")))
+      .child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…"));
+  }
+
   render(cx) {
+    if (this.viewer) return this.viewerView(cx);
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme(), sec = S.sectionOf("wb-files"), ov = S.overlay(sec);
     // The header wears the active project's color (its tile in the Spaces list), so the project shows at a glance.
@@ -177,13 +209,11 @@ export default class Files extends View {
       .child(S.header(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
           .when(Boolean(fill), el => el.bg(fill).text_color("#ffffff")), sec, 44)
         .child(S.mark(sec))
-        .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(fill ? "#ffffffcc" : t.muted).on_click((_e, cx) => { cx.stop_propagation(); this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(fill ? "#ffffffcc" : t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
-      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(fill ? "#ffffffcc" : t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
+      .child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
-        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")))
+        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))))
       .when(Boolean(ov), el => el.child(ov));
   }
 }
