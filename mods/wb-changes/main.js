@@ -2,7 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
-import { Log, remoteOf, installed, location, READ, getPrefs, setPrefs, getAuthor, setAuthor, nameColor, prHintFor } from "./log.js";
+import { Log, remoteOf, installed, location, READ, getPrefs, setPrefs, getAuthor, setAuthor, nameColor, prHintFor, pushPlan } from "./log.js";
 import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, NO_TRAILERS, runModel, describe } from "./ai.js";
 const key = () => JSON.stringify(location());
 
@@ -389,10 +389,10 @@ export default class Changes extends View {
       if (push) {
         try {
           this.phase = "Pushing…"; cx.notify();
-          const up = await exec("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: root, on });
-          const r = await exec("git", up.code === 0 ? ["push"] : ["push", "-u", "origin", "HEAD"], { cwd: root, on, timeout: 600000 });
+          const plan = await pushPlan(root, on);
+          const r = await exec("git", plan.args, { cwd: root, on, timeout: 600000 });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-          if (up.code !== 0) this.showPrHint(root, on, cx);
+          if (plan.fresh) this.showPrHint(root, on, cx);
         } catch (e) { if (key() === context) this.note = `Committed, but push failed: ${e}`; }
       }
       this.busy = false; this.refresh(cx); cx.notify();
@@ -541,7 +541,7 @@ export default class Changes extends View {
           .child(div().flex_1())
           .child(h_flex().id("commit").h(30).flex_none().rounded(8).overflow_hidden().bg(enabled ? t.solid : t.raised)
             .child(h_flex().id("commit-run").px(14).h_full().items_center().text_size(12).text_color(enabled ? t.solid_foreground : t.dim).when(enabled, (e) => e.cursor_pointer()).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.commit(cx))
-              .tooltip((commitAction() === "push" ? "Commit the checked files with this message, then push (sets origin upstream if the branch has none)" : "Commit the checked files with this message") + (nChecked ? "" : " · nothing checked"))
+              .tooltip((commitAction() === "push" ? "Commit the checked files with this message, then push to the same-named branch on origin" : "Commit the checked files with this message") + (nChecked ? "" : " · nothing checked"))
               .child(this.busy ? (this.phase ?? "Committing…") : commitAction() === "push" ? "Commit and Push" : "Commit"))
             .child(div().id("commit-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(enabled ? t.solid_foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Commit or Commit and Push").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 190, height: 74, props: { commitMenu: true } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))))
       .child(this.log.view(t, { open: pr.logOpen, h: this.logH, startDrag: (e) => { this.splitDrag = { kind: "log", y: e.position.y, h: this.logH }; }, toggle: () => setPrefs({ logOpen: !pr.logOpen }) }))

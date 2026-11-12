@@ -46,6 +46,21 @@ export function remoteOf(url) {
   return m ? { host: m[1].toLowerCase(), path: m[2] } : null;
 }
 // After pushing a branch that had no upstream: what the "Create pull request?" hint needs (null: no usable origin).
+// How to push like the IDE does: to the same-named branch on the remote. A branch cut from another one
+// (e.g. created from origin/staging, so its upstream is origin/staging) would make a plain `git push`
+// fail (push.default=simple) or hit the wrong branch: push HEAD to <remote>/<branch> and track that.
+// fresh: that remote branch didn't exist yet (a new branch: offer a PR).
+export async function pushPlan(root, on) {
+  const g = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+  const [head, up] = await Promise.all([g(["rev-parse", "--abbrev-ref", "HEAD"]), g(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])]);
+  const branch = head.stdout.trim();
+  if (head.code !== 0 || branch === "HEAD") throw new Error("Not on a branch (detached HEAD): nothing to push");
+  const remote = (await g(["config", `branch.${branch}.remote`])).stdout.trim() || "origin";
+  if (up.code === 0 && up.stdout.trim() === `${remote}/${branch}`) return { args: ["push"], fresh: false };
+  const exists = (await g(["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${branch}`])).code === 0;
+  return { args: ["push", "-u", remote, `HEAD:refs/heads/${branch}`], fresh: !exists };
+}
+
 export async function prHintFor(root, on) {
   const [b, u] = await Promise.all([exec("git", [...READ, "rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, on }), exec("git", [...READ, "remote", "get-url", "origin"], { cwd: root, on })]);
   const remote = u.code === 0 ? remoteOf(u.stdout.trim()) : null;
@@ -192,8 +207,12 @@ export class Log {
     });
   }
   push(rk, cx) {
-    const noUp = !this.repos[rk]?.upstream, { on, root } = this.where(rk);
-    this.action(rk, "Push", noUp ? ["push", "-u", "origin", "HEAD"] : ["push"], cx, { onOk: () => { if (noUp) this.host.pushed(root, on, cx); } });
+    const { on, root } = this.where(rk);
+    cx.spawn(async (cx) => {
+      let plan;
+      try { plan = await pushPlan(root, on); } catch (e) { this.note = { ok: false, text: `Push failed: ${e.message ?? e}` }; cx.notify(); return; }
+      this.action(rk, "Push", plan.args, cx, { onOk: () => { if (plan.fresh) this.host.pushed(root, on, cx); } });
+    });
   }
 
   toggle(c, cx) {
@@ -295,7 +314,7 @@ export class Log {
             .when(!r.upstream, (e) => e.child(div().flex_none().text_color(t.dim).child("no upstream")))))
         .when(Boolean(r && !r.error && rk), (e) => e
           .child(tool("pull", `Pull${r.behind ? ` ↓${r.behind}` : ""}`, "Fast-forward, or rebase my commits on top when the branches diverged", (_e, cx) => this.pull(rk, cx), r.behind > 0, Boolean(this.busy?.startsWith("Pull"))))
-          .child(tool("push", `Push${r.ahead ? ` ↑${r.ahead}` : ""}`, r.upstream ? `git push to ${r.upstream}` : "No upstream yet: git push -u origin HEAD", (_e, cx) => this.push(rk, cx), r.ahead > 0, this.busy === "Push")))
+          .child(tool("push", `Push${r.ahead ? ` ↑${r.ahead}` : ""}`, "Push to the same-named branch on origin (created and tracked if it isn't there yet)", (_e, cx) => this.push(rk, cx), r.ahead > 0, this.busy === "Push")))
         .child(div().id("log-reload").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted)
           .hover((s) => s.bg(t.raised)).tooltip("Reload the log").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); if (rk) this.load(rk, cx); })
           .child(svg("mods/wb-changes/icons/refresh.svg").size(12).when(Boolean(busyLoad), (s) => s.spin(900)))))
