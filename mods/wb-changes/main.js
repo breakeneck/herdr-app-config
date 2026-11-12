@@ -39,6 +39,7 @@ export default class Changes extends View {
   init(_props, cx) {
     // Popups (menus) are separate copies: they only draw, the panel copy does all the work.
     if (props()?.menu || props()?.commitMenu || props()?.viewMenu || props()?.authorMenu) return;
+    if (props()?.fileMenu) { this.confirming = false; this.reverting = false; return; }
     S.migrateKeys(["sections.collapsed"]);
     migrate();
     this.files = []; this.collapsed = new Set(); this.unchecked = new Map(); this.prHint = null;
@@ -267,6 +268,7 @@ export default class Changes extends View {
     const n = under.filter((f) => !u.has(f.path)).length, state = n === 0 ? 0 : n === under.length ? 1 : 2;
     return h_flex().id(`dir-${r.path}`).h(ITEM).flex_none().pl(8 + r.depth * INDENT).pr(8).gap(6).items_center().rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleDir(r.path, cx))
+      .on_mouse_down("right", (_e, cx) => this.fileMenu(under.map((f) => f.path), r.label, false, cx))
       .child(div().w(12).text_size(10).text_color(t.muted).child(r.open ? "▾" : "▸"))
       .child(this.checkbox(`dcb-${r.path}`, state, t, (cx) => this.setChecked(under.map((f) => f.path), state !== 1, cx)))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.label))
@@ -442,12 +444,73 @@ export default class Changes extends View {
       .children(authors.map((a, i) => item(`au-${i}`, a, a)));
   }
 
+  // Right-click on a changed file or folder: its menu, a popup copy of this mod (see fileMenuView).
+  fileMenu(paths, label, single, cx) {
+    cx.stop_propagation();
+    if (!this.root || !paths.length) return;
+    openOverlay({ mod: "wb-changes", kind: "popup", width: 280, height: single ? 130 : 96, props: { fileMenu: { root: this.root, on: this.on ?? null, paths, label, single } } });
+  }
+
+  // Rollback, like the IDE's: tracked files go back to HEAD (index and working tree); files HEAD doesn't
+  // have (new, untracked) are removed from the index and deleted. Runs in the popup, which closes after.
+  async rollback({ root, on, paths }) {
+    const git = (args) => exec("git", ["--literal-pathspecs", ...args], { cwd: root, on });
+    // A failed lookup must not make every file look new (and get deleted): only a repo without commits has no HEAD.
+    const ls = await git(["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD", "--", ...paths]);
+    if (ls.code !== 0 && (await git(["rev-parse", "--verify", "-q", "HEAD"])).code === 0) throw new Error((ls.stderr || "git ls-tree failed").trim());
+    const inHead = new Set(ls.code === 0 ? ls.stdout.split("\0").filter(Boolean) : []);
+    const old = paths.filter((p) => inHead.has(p)), fresh = paths.filter((p) => !inHead.has(p));
+    if (old.length) {
+      const r = await git(["restore", "--source=HEAD", "--staged", "--worktree", "--", ...old]);
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+    }
+    if (fresh.length) {
+      await git(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "-f", "--", ...fresh]);
+      const r = await exec("rm", ["-f", "--", ...fresh], { cwd: root, on });
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+    }
+    return { old: old.length, fresh: fresh.length };
+  }
+
+  fileMenuView() {
+    const t = theme(), m = props().fileMenu, n = m.paths.length;
+    const close = () => closeOverlay(props()?.overlay);
+    const item = (id, label, action, danger = false) => h_flex().id(id).h(30).px(10).gap(8).items_center().rounded(6).cursor_pointer()
+      .text_size(12.5).text_color(danger ? t.ansi1 : t.foreground).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => action(cx)).child(label);
+    const what = n === 1 ? m.label : `${n} files in ${m.label}`;
+    if (this.confirming) return v_flex().p(8).gap(6).w_full().bg(t.raised).text_color(t.foreground)
+      .child(div().text_size(12).font_semibold().child(`Roll back ${what}?`))
+      .child(div().text_size(11).text_color(t.muted).child("Local changes are lost; files not in HEAD are deleted."))
+      .child(h_flex().gap(6).justify_end()
+        .child(item("rb-cancel", "Cancel", () => close()))
+        .child(item("rb-go", this.reverting ? "Rolling back…" : "Roll back", (cx) => {
+          if (this.reverting) return;
+          this.reverting = true; cx.notify();
+          cx.spawn(async (cx) => {
+            try { await this.rollback(m); }
+            catch (e) { notify({ title: "Rollback failed", body: String(e.message ?? e), level: "error" }); }
+            setShared("wb.changes.reverted", Date.now());
+            close();
+          });
+        }, true)));
+    return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
+      .when(m.single, (e) => e.child(item("fm-diff", "Show diff", () => { setShared("wb.changes.openDiff", { path: m.paths[0], ts: Date.now() }); close(); })))
+      .when(m.single, (e) => e.child(item("fm-copy", "Copy path", (cx) => { cx.write_to_clipboard(`${m.root}/${m.paths[0]}`); close(); })))
+      .child(item("fm-rollback", n === 1 ? "Rollback…" : `Rollback ${n} files…`, (cx) => { this.confirming = true; cx.notify(); }, true));
+  }
+
   render(cx) {
+    if (props()?.fileMenu) return this.fileMenuView();
     if (props()?.menu) return this.menuView();
     if (props()?.commitMenu) return this.commitMenuView();
     if (props()?.viewMenu) return this.viewMenuView();
     if (props()?.authorMenu) return this.authorMenuView();
     if (key() !== this.context) this.refresh(cx);
+    // The file menu's actions: a rollback reloads the list; Show diff opens it like a click.
+    const rev = shared("wb.changes.reverted") ?? 0, od = shared("wb.changes.openDiff");
+    if (rev > (this.revSeen ?? BOOT)) { this.revSeen = rev; this.refresh(cx); }
+    if (od && od.ts > (this.odSeen ?? BOOT)) { this.odSeen = od.ts; if (this.files.some((f) => f.path === od.path)) cx.spawn(async (cx) => this.pick(od.path, cx)); }
     // Prefs changed in the ⋯ popup: a new scope reloads the list (the log follows its own pref in log.sync).
     const pr = getPrefs();
     this.view = pr.view;
@@ -508,6 +571,7 @@ export default class Changes extends View {
         const f = r.file, parts = tree ? [] : f.path.split("/"), name = tree ? r.name : parts.pop();
         const kind = f.status === "U" ? "X" : f.fresh ? "U" : f.status;
         return h_flex().id(`change-${f.path}`).h(ITEM).flex_none().px(8).pl(tree ? 8 + r.depth * INDENT + 18 : 8).gap(6).items_center().rounded(5).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
+          .on_mouse_down("right", (_e, cx) => this.fileMenu([f.path], f.path.split("/").pop(), true, cx))
           .child(this.checkbox(`cb-${f.path}`, unc.has(f.path) ? 0 : 1, t, (cx) => this.setChecked([f.path], unc.has(f.path), cx)))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().text_color(nameColor(kind)).when(kind === "D", (s) => s.line_through()).child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
