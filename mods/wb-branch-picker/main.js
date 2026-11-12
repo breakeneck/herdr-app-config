@@ -1,8 +1,10 @@
 // Branch picker behind the header's branch chip: all local branches in a tree
 // (groups by their `prefix/`), recently checked-out ones pinned on top, a filter
 // box. A click runs `git checkout` and nothing else — spaces, tabs and terminals
-// never move. Branches that were deleted (after their merge) drop out of the
-// recent list by themselves.
+// never move. The dialog stays open after it, so Fetch (git fetch --prune) can show
+// what's new upstream: each branch shows ↓ behind / ↑ ahead of its upstream.
+// Recent comes from git's reflog, so terminal checkouts count and deleted
+// branches drop out by themselves.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
@@ -15,6 +17,7 @@ function place(sp, ps) {
     ?? ps.find(p => tabs.has(p.tab) && p.cwd)?.cwd ?? sp?.folder ?? null;
 }
 
+const RECENTS = 8;
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const ago = (s) => {
   const d = Date.now() / 1000 - s;
@@ -30,9 +33,10 @@ export default class BranchPicker extends View {
     this.branches = undefined; // undefined: loading; then [{ name, at }]
     this.current = null;
     this.recents = [];
-    this.recentKey = null;
     this.error = "";
     this.busy = "";
+    this.fetching = false;
+    this.note = "";
     this.text = "";
     this.at = 0;
     this.collapsed = new Set(JSON.parse(localStorage.getItem("collapsed") ?? "[]"));
@@ -65,21 +69,26 @@ export default class BranchPicker extends View {
       this.inSub = Boolean(prefix.trim());
       const head = await exec("git", [...READ, "status", "--porcelain=v2", "--branch"], { cwd: this.folder, on: this.on });
       for (const line of head.stdout.split("\n")) if (line.startsWith("# branch.head ")) this.current = line.slice(14);
-      const fmt = "--format=%(refname:short)%09%(committerdate:unix)";
+      const fmt = "--format=%(refname:short)%09%(committerdate:unix)%09%(upstream:track,nobracket)";
       const local = await exec("git", [...READ, "for-each-ref", fmt, "refs/heads"], { cwd: this.folder, on: this.on });
       const list = local.stdout.split("\n").filter(Boolean)
-        .map(l => { const [name, at] = l.split("\t"); return { name, at: Number(at) || 0 }; })
+        .map(l => {
+          const [name, at, track = ""] = l.split("\t");
+          return { name, at: Number(at) || 0, ahead: Number(track.match(/ahead (\d+)/)?.[1] ?? 0), behind: Number(track.match(/behind (\d+)/)?.[1] ?? 0), gone: track === "gone" };
+        })
         .sort((a, b) => b.at - a.at);
       this.branches = list;
-      // Recents live per repo; a branch deleted after its merge leaves the list with it.
-      const key = JSON.stringify([this.on, rootRaw]);
+      // Recents, like the IDE's: the branches HEAD last moved to, from git's own reflog — so checkouts made
+      // in a terminal count too, and nothing is stored here. The current one and deleted ones are left out.
       const known = new Set(list.map(b => b.name));
-      const stored = JSON.parse(localStorage.getItem("recents") ?? "{}");
-      this.recentKey = key;
-      this.recents = (stored[key] ?? []).filter(n => known.has(n));
-      if ((stored[key] ?? []).join("\n") !== this.recents.join("\n")) {
-        stored[key] = this.recents;
-        localStorage.setItem("recents", JSON.stringify(stored));
+      const log = await exec("git", [...READ, "reflog", "--format=%gs", "-n", "1000"], { cwd: this.folder, on: this.on });
+      const seen = new Set([this.current]);
+      this.recents = [];
+      for (const l of log.stdout.split("\n")) {
+        const m = l.match(/^checkout: moving from (.+) to (.+)$/);
+        if (!m) continue;
+        for (const n of [m[2], m[1]]) if (known.has(n) && !seen.has(n)) { seen.add(n); this.recents.push(n); }
+        if (this.recents.length >= RECENTS) break;
       }
     } catch (e) {
       this.branches = [];
@@ -131,6 +140,7 @@ export default class BranchPicker extends View {
     if (!b || this.busy || b.name === this.current) return;
     this.busy = b.name;
     this.error = "";
+    this.note = "";
     cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -142,17 +152,39 @@ export default class BranchPicker extends View {
           cx.notify();
           return;
         }
-        this.recents = [b.name, ...this.recents.filter(n => n !== b.name)].slice(0, 10);
-        const stored = JSON.parse(localStorage.getItem("recents") ?? "{}");
-        stored[this.recentKey] = this.recents;
-        localStorage.setItem("recents", JSON.stringify(stored));
-        setShared("wb.branch.switched", Date.now()); // the header chip re-asks on this
-        this.close();
+        // The branch left goes to the top of Recent; the new current one leaves it.
+        if (this.current) this.recents = [this.current, ...this.recents.filter(n => n !== this.current && n !== b.name)].slice(0, RECENTS);
+        setShared("wb.branch.switched", Date.now()); // the header chip and the log re-ask on this
+        // Stay open: the new current branch is marked, and Fetch is one click away.
+        this.current = b.name;
+        this.busy = "";
+        this.note = `Switched to ${b.name}`;
+        cx.notify();
       } catch (e) {
         this.busy = "";
         this.error = String(e?.message ?? e);
         cx.notify();
       }
+    });
+  }
+
+  fetch(cx) {
+    if (this.fetching || !this.root) return;
+    this.fetching = true; this.error = ""; this.note = "";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("git", ["fetch", "--prune", "--quiet"], { cwd: this.root, on: this.on, timeout: 180_000 });
+        if (r.code !== 0) this.error = (r.stderr || r.stdout).trim().split("\n").filter(Boolean).pop() || "git fetch failed.";
+        else {
+          await this.load();
+          const cur = this.branches?.find(b => b.name === this.current);
+          this.note = cur?.behind ? `Fetched · ${cur.name} is ${cur.behind} behind its upstream` : "Fetched · up to date";
+          setShared("wb.branch.switched", Date.now()); // the log and the chip show the new ↓/↑
+        }
+      } catch (e) { this.error = String(e?.message ?? e); }
+      this.fetching = false;
+      cx.notify();
     });
   }
 
@@ -201,6 +233,10 @@ export default class BranchPicker extends View {
         .on_click((_e, cx) => this.pick(r.b, cx))
         .child(svg(`mods/wb-branch-picker/icons/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
         .child(div().flex_1().min_w(0).truncate().text_color(cur ? t.foreground : t.muted).child(r.rest ?? r.b.name))
+        .when(r.b.behind > 0 || r.b.ahead > 0 || r.b.gone, el => el.child(h_flex().flex_none().gap(4).text_size(11)
+          .when(r.b.behind > 0, el => el.child(div().text_color(t.ansi4).child(`↓${r.b.behind}`)))
+          .when(r.b.ahead > 0, el => el.child(div().text_color(t.ansi2).child(`↑${r.b.ahead}`)))
+          .when(r.b.gone, el => el.child(div().text_color(t.dim).tooltip("Its upstream branch was deleted").child("gone")))))
         .when(cur, el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("current")))
         .when(busy, el => el.child(svg("mods/wb-branch-picker/icons/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(!cur && !busy && r.b.at > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.b.at))));
@@ -216,7 +252,14 @@ export default class BranchPicker extends View {
       .text_size(13)
       .child(h_flex()
         .child(div().flex_1().font_semibold().text_color(t.foreground).child(`Branches${this.repoName ? ` of ${this.repoName}` : ""}`))
-        .when(this.branches, el => el.child(div().text_size(11).text_color(t.dim).child(this.text.trim() ? `${rows.filter(r => r.kind === "row").length}/${total}` : `${total}`))))
+        .when(this.branches, el => el.child(div().text_size(11).text_color(t.dim).child(this.text.trim() ? `${rows.filter(r => r.kind === "row").length}/${total}` : `${total}`)))
+        .when(Boolean(this.root), el => el.child(h_flex().id("br-fetch").ml(10).h(24).px(8).gap(5).items_center().rounded(6).border(1).border_color(t.border)
+          .text_size(11.5).text_color(this.fetching ? t.dim : t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+          .tooltip("git fetch --prune: see what's new upstream (your files don't change)")
+          .on_click((_e, cx) => this.fetch(cx))
+          .when(this.fetching, el => el.child(svg("mods/wb-branch-picker/icons/spinner.svg").size(11).spin(900)))
+          .child(this.fetching ? "Fetching…" : "Fetch"))))
+      .when(Boolean(this.note) && !this.error, el => el.child(div().text_size(11.5).text_color(t.dim).child(this.note)))
       .when(this.inSub, el => el.child(div().text_size(11).text_color(t.dim).child(`checked out inside ${this.folder.replace(this.root + "/", "")}`)))
       .when(this.branches === undefined, el => el.child(div().text_color(t.muted).child("…")))
       .when(this.branches && this.error && !this.branches.length, el => el.child(div().text_color(t.muted).child(this.error)))

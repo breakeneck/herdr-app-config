@@ -103,11 +103,14 @@ export class Log {
   // Render must not notify: a space switch or a changed pref is picked up right after this frame.
   sync(cx) {
     const loc = location(), all = getPrefs().logAll;
-    const moved = `${loc.on}|${loc.cwd}` !== this.loc, flipped = all !== this.lastAll;
-    if ((moved || flipped) && !this.soon) {
+    // A checkout (branch picker, the chip) or a fetch elsewhere: the log reloads for the new HEAD.
+    const switched = Number(shared("wb.branch.switched") ?? 0);
+    const moved = `${loc.on}|${loc.cwd}` !== this.loc, flipped = all !== this.lastAll, headMoved = switched !== (this.lastSwitch ??= switched);
+    if ((moved || flipped || headMoved) && !this.soon) {
       this.soon = true;
       cx.spawn(async (cx) => {
         this.soon = false;
+        if (switched !== this.lastSwitch) { this.lastSwitch = switched; this.open = null; if (this.cur) this.load(this.cur, cx, true); }
         if (all !== this.lastAll) { this.lastAll = all; if (this.cur) this.load(this.cur, cx); }
         this.follow(cx);
       });
@@ -143,7 +146,7 @@ export class Log {
   // quiet: a background refresh (timer, a project switch with a cached log): no spinner.
   load(rk, cx, quiet = false) {
     if (!quiet) { this.spinning.add(rk); cx.notify(); }
-    if (this.loading.has(rk)) return;
+    if (this.loading.has(rk)) { (this.again ??= new Set()).add(rk); return; } // asked mid-load: once more after it
     this.loading.add(rk);
     const all = getPrefs().logAll;
     cx.spawn(async (cx) => {
@@ -169,7 +172,11 @@ export class Log {
         this.repos[rk] = { branch, upstream, ahead: ahead || 0, behind: behind || 0, commits, incoming, outgoing, all, me: me.code === 0 ? me.stdout.trim() : "", at: Date.now(), error: null };
         store.set(`log:${rk}`, this.repos[rk]);
       } catch (e) { this.repos[rk] = { ...prev, error: String(e.message ?? e) }; }
-      finally { this.loading.delete(rk); this.spinning.delete(rk); cx.notify(); }
+      finally {
+        this.loading.delete(rk);
+        if (this.again?.delete(rk)) this.load(rk, cx, !this.spinning.has(rk)); else this.spinning.delete(rk);
+        cx.notify();
+      }
     });
   }
 
@@ -185,7 +192,7 @@ export class Log {
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `${label} failed`).trim().split("\n").slice(-3).join(" "));
         if (!quiet) this.note = { ok: true, text: `${label}: ${(r.stdout || r.stderr || "done").trim().split("\n").pop()}` };
         // Something that moved HEAD: the Changes panel and the branch chip ask again.
-        setShared("wb.branch.switched", Date.now());
+        this.lastSwitch = Date.now(); setShared("wb.branch.switched", this.lastSwitch);
         onOk?.();
       } catch (e) {
         if (onFail) { this.busy = null; onFail(String(e.message ?? e), cx); return; }
