@@ -532,7 +532,14 @@ export default class Changes extends View {
       .text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); act(cx); })
       .child(icon).child(label).when(Boolean(extra), (e) => e.child(extra));
-    const popup = (mod, width) => () => openOverlay({ mod, kind: "popup", width, height: 620, props: { popup: true } });
+    // The popup gets this place and its origin remote, found here: a popup copy starts with empty storage,
+    // and its own lookup on start proved unreliable, so it would sit on "open a project folder".
+    const popup = (mod, width) => (_e, cx) => cx.spawn(async () => {
+      const loc = location(), lk = `${loc.on}|${loc.cwd}`;
+      const o = this.root ? await exec("git", ["remote", "get-url", "origin"], { cwd: this.root, on: this.on ?? null }).catch(() => null) : null;
+      const remote = o?.code === 0 ? remoteOf(o.stdout.trim()) : null;
+      openOverlay({ mod, kind: "popup", width, height: 620, props: { popup: true, lk, remote } });
+    });
     return v_flex().id("changes").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); return; }

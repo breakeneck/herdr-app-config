@@ -181,6 +181,8 @@ export default class Jira extends View {
     // store under the plain name); the old key is read once, and entries that aren't a key are dropped.
     const rem = store.get("tasks:remotes", null) ?? store.get("remotes", []);
     this.remotes = new Map((Array.isArray(rem) ? rem : []).filter((e) => Array.isArray(e) && typeof e[1] === "string"));
+    // Opened from the Changes panel: it already knows this place's remote.
+    const pr = props(); if (pr?.lk && pr?.remote) this.remotes.set(pr.lk, `${pr.remote.host}|${pr.remote.path}`);
     this.loc = null; this.repo = null; this.picking = false; this.trelloForm = false; this.choosing = false; this.jform = null;
     this.press = null; this.dragging = false; // a pressed issue row, and whether it's being dragged
     this.saving = false; this.formError = null; this.query = "";
@@ -631,7 +633,7 @@ export default class Jira extends View {
     const iconButton = (id, icon, tip, onClick, spin = false) => div().id(id).size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(tip).on_click((e, cx) => { cx.stop_propagation(); onClick(e, cx); }).child(svg(icon).size(14).when(spin, (s) => s.spin(900)));
     const pop = this.popup, sec = pop ? null : S.sectionOf("wb-tasks"), ov = pop ? null : S.overlay(sec);
-    return v_flex().id("jira").size_full().min_h(0).relative().when(!pop, (e) => e.rounded(10).border_1().border_color(t.border)).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(12)
+    return v_flex().id("jira").size_full().min_h(0).relative().when(pop, (e) => e.h(610)).when(!pop, (e) => e.rounded(10).border_1().border_color(t.border)).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(12)
       .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
       // A press on an issue becomes a drag once the pointer moves; the release (here, after a
       // column's own handler) ends it. Leaving the panel cancels.

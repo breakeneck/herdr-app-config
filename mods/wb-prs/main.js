@@ -150,6 +150,8 @@ export default class Prs extends View {
     this.fetching = new Set(); // repo keys being fetched one by one (a project switch)
     // The last lists and folder→repo answers survive restarts: a switch shows them at once.
     this.loadCache();
+    // Opened from the Changes panel: it already knows this place's remote (a popup starts with empty storage).
+    const pp = props(); if (pp?.lk && pp?.remote) this.remotes.set(pp.lk, { key: `${pp.remote.host}|${pp.remote.path}`, name: pp.remote.path, host: pp.remote.host, path: pp.remote.path });
     this.key = null; this.focus(cx);
     this.poll(cx);
     // The folder follows focus: render notices a switch at once; this catches a `cd` inside a terminal.
@@ -632,7 +634,7 @@ export default class Prs extends View {
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => { cx.stop_propagation(); this.poll(cx); })
       .child(svg("mods/wb-prs/refresh.svg").size(14).when(busy, (s) => s.spin(900)));
     const pop = this.popup, sec = pop ? null : S.sectionOf("wb-prs"), ov = pop ? null : S.overlay(sec);
-    return v_flex().id("prs").size_full().min_h(0).relative()
+    return v_flex().id("prs").size_full().min_h(0).relative().when(pop, (e) => e.h(610))
       .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
       .on_mouse_down("right", (e, cx) => {
         if (!this.menuPr) return;
