@@ -2,7 +2,7 @@
 // conflict blocks side by side (Yours | Theirs) on the right. Per file: Accept Yours, Accept Theirs,
 // Resolve with AI (the AI models of wb-ai, use "conflict", picked per project), Open in the editor tab and
 // Mark resolved. On top: Resolve all with AI. Then Continue (or Abort) the rebase / merge.
-// props: { root, on }. Opened by the log's Update / conflicts button and the branch picker (gitsync.js).
+// props: { root, on }. Opened only from the Changes header's Resolve button, shown while files are unmerged.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar } from "gpui-base";

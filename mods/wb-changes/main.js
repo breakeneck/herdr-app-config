@@ -2,6 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, exec, watchFolder, appHome, readTextFile, notify, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import * as S from "./section.js";
+import { openConflicts } from "./gitsync.js";
 import { Log, remoteOf, installed, location, READ, getPrefs, setPrefs, getAuthor, setAuthor, nameColor, prHintFor, pushPlan } from "./log.js";
 import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, NO_TRAILERS, runModel, describe } from "./ai.js";
 const key = () => JSON.stringify(location());
@@ -524,6 +525,7 @@ export default class Changes extends View {
     const genEnabled = Boolean(this.root && !generating && !this.busy && !this.loading && this.context === key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     const sec = S.sectionOf("wb-changes"), ov = S.overlay(sec);
+    const nConflicts = (this.files ?? []).filter((f) => f.status === "U").length;
     const lr = this.log.current(), fetching = this.log.busy === "Update";
     // The hint goes away when the repo or branch it was for is no longer the one shown.
     if (this.prHint && (this.prHint.id !== this.repoId || (lr?.branch && lr.branch !== this.prHint.branch))) this.prHint = null;
@@ -561,9 +563,16 @@ export default class Changes extends View {
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).flex_none().child(nChecked < total ? `${nChecked} of ${total} files` : `${total} files`))
         .when(installed("wb-tasks"), (e) => e.child(hbtn("open-tasks", "Tasks", "Tasks", svg("mods/wb-changes/icons/jira.svg").size(12), popup("wb-tasks", 440))))
         .when(installed("wb-prs"), (e) => e.child(hbtn("open-prs", "PR", "Pull requests", svg("mods/wb-changes/icons/pr.svg").size(12), popup("wb-prs", 460))))
+        // Only while files are unmerged (a rebase/merge stopped, or an autostash that didn't apply): opens wb-conflicts.
+        .when(nConflicts > 0 && Boolean(this.root), (e) => e.child(h_flex().id("resolve").h(22).px(8).gap(5).flex_none().items_center().rounded(6).cursor_pointer()
+          .bg(t.blocked).text_size(11).font_semibold().text_color(t.solid_foreground).hover((s) => s.opacity(0.85))
+          .tooltip(`${nConflicts} conflicted file${nConflicts === 1 ? "" : "s"}: open the conflicts dialog`)
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); openConflicts(this.root, this.on); })
+          .child(`Resolve ${nConflicts}`)))
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`))
-        .child(hbtn("fetch", "", "Update: fetch, then bring the upstream's commits in (fast-forward or rebase; conflicts open the conflicts dialog)", fetching ? svg("mods/wb-changes/icons/spinner.svg").size(12).spin(900) : svg("mods/wb-changes/icons/refresh.svg").size(12),
+        .child(hbtn("fetch", "", "Update: fetch, then bring the upstream's commits in (fast-forward or rebase; on conflicts a Resolve button shows here)", fetching ? svg("mods/wb-changes/icons/spinner.svg").size(12).spin(900) : svg("mods/wb-changes/icons/refresh.svg").size(12),
           (cx) => { if (this.log.cur) this.log.update(this.log.cur, cx); }, lr?.behind ? div().text_color(t.accent).child(`↓${lr.behind}`) : null))
         .child(div().id("view-menu").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())

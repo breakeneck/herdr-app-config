@@ -2,14 +2,14 @@
 // (groups by their `prefix/`), recently checked-out ones pinned on top, a filter
 // box. A click runs `git checkout` and nothing else — spaces, tabs and terminals
 // never move. The dialog stays open after it, so Update (gitsync.js: fetch + fast-forward or rebase,
-// conflicts in wb-conflicts) is one click away; each branch shows ↓ behind / ↑ ahead of its upstream.
+// conflicts via the Changes header's Resolve) is one click away; each branch shows ↓ behind / ↑ ahead of its upstream.
 // Recent comes from git's reflog, so terminal checkouts count and deleted
 // branches drop out by themselves.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { props, closeOverlay, theme, spaces, panes, exec, setShared } from "herdr";
-import { updateRepo, openConflicts, lastSync, repoKey } from "./gitsync.js";
+import { updateRepo, lastSync, repoKey } from "./gitsync.js";
 
 // Where a space works now: its focused terminal's folder, else the first known one.
 function place(sp, ps) {
@@ -170,7 +170,7 @@ export default class BranchPicker extends View {
   }
 
   // Update the current branch (gitsync.js, the same as the log's Update): fetch, then fast-forward or rebase.
-  // A conflict closes this and opens the conflicts dialog.
+  // A conflict says so; the Changes header shows Resolve, which opens the conflicts dialog.
   update(cx) {
     if (this.fetching || !this.root) return;
     this.fetching = true; this.error = ""; this.note = "";
@@ -179,9 +179,9 @@ export default class BranchPicker extends View {
       try {
         const r = await updateRepo(this.root, this.on);
         this.seenSync = lastSync()?.ts ?? 0; // our own announce: the list reloads right here
-        if (r.conflict) { this.fetching = false; this.close(); openConflicts(this.root, this.on); return; }
         await this.load();
-        this.note = r.text;
+        if (r.conflict) this.error = `${r.text} · Resolve them from the Resolve button in the Changes header`;
+        else this.note = r.text;
       } catch (e) { this.error = String(e?.message ?? e); await this.load().catch(() => {}); }
       this.fetching = false;
       cx.notify();
@@ -266,7 +266,7 @@ export default class BranchPicker extends View {
         .when(this.branches, el => el.child(div().text_size(11).text_color(t.dim).child(this.text.trim() ? `${rows.filter(r => r.kind === "row").length}/${total}` : `${total}`)))
         .when(Boolean(this.root), el => el.child(h_flex().id("br-fetch").ml(10).h(24).px(8).gap(5).items_center().rounded(6).border(1).border_color(t.border)
           .text_size(11.5).text_color(this.fetching ? t.dim : t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
-          .tooltip(`Update ${this.current ?? "the current branch"}: fetch, then bring its upstream's commits in (fast-forward, or rebase your commits on top). Conflicts open the conflicts dialog.`)
+          .tooltip(`Update ${this.current ?? "the current branch"}: fetch, then bring its upstream's commits in (fast-forward, or rebase your commits on top). On conflicts, Resolve shows in the Changes header.`)
           .on_click((_e, cx) => this.update(cx))
           .when(this.fetching, el => el.child(svg("mods/wb-branch-picker/icons/spinner.svg").size(11).spin(900)))
           .child(this.fetching ? "Updating…" : `Update${cur?.behind ? ` ↓${cur.behind}` : ""}`))))

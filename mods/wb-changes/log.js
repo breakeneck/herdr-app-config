@@ -1,6 +1,6 @@
 // The Log section of the Changes panel (like JetBrains' Git log): the commits of the focused project — its branch
 // together with the upstream, so commits not pulled yet (↓ incoming) and not pushed yet (↑ outgoing) show — or all
-// branches. Update (fetch + fast-forward or rebase; conflicts open wb-conflicts); no auto refresh, only a
+// branches. Update (fetch + fast-forward or rebase; conflicts: the header's Resolve opens wb-conflicts); no auto refresh, only a
 // "New · Reload" hint (pushing is the Commit and Push button above). Click a commit: its full message and
 // changed files; click a file: that commit's diff in the main area (wb-diff).
 // Runs git on the project's machine; each repo's last log is cached so a project switch shows at once.
@@ -9,7 +9,7 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, settings, notify, run, shared, setShared, openOverlay } from "herdr";
-import { updateRepo, openConflicts, lastSync } from "./gitsync.js";
+import { updateRepo, lastSync } from "./gitsync.js";
 
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
@@ -218,7 +218,7 @@ export class Log {
     });
   }
 
-  // Update (gitsync.js): fetch, then fast-forward or rebase onto the upstream; a conflict opens the dialog.
+  // Update (gitsync.js): fetch, then fast-forward or rebase onto the upstream; on a conflict the header shows Resolve.
   update(rk, cx) {
     if (this.busy) return;
     const { on, root } = this.where(rk);
@@ -226,8 +226,7 @@ export class Log {
     cx.spawn(async (cx) => {
       try {
         const r = await updateRepo(root, on);
-        this.note = { ok: !r.conflict, text: r.text };
-        if (r.conflict) openConflicts(root, on);
+        this.note = { ok: !r.conflict, text: r.conflict ? `${r.text} · Resolve them from the button in the header` : r.text };
       } catch (e) { this.note = { ok: false, text: `Update failed: ${e.message ?? e}` }; }
       this.busy = null; this.lastFetch[rk] = Date.now();
       this.load(rk, cx, true); cx.notify();
@@ -333,11 +332,7 @@ export class Log {
             .when(!r.upstream, (e) => e.child(div().flex_none().text_color(t.dim).child("no upstream")))))
         .when(Boolean(r && !r.error && rk), (e) => e
           .when(Boolean(this.newer.has(rk)), (e) => e.child(tool("newer", "● New · Reload", "Commits or branches moved since this log was drawn", (_e, cx) => this.load(rk, cx), true)))
-          .when(r.conflicts > 0, (e) => e.child(h_flex().id("conflicts").h(22).px(7).flex_none().items_center().rounded(6).cursor_pointer().border_1().border_color(t.blocked)
-            .text_size(11).text_color(t.blocked).hover((s) => s.bg(t.hover)).tooltip("Resolve the merge conflicts").on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-            .on_click((_e, cx) => { cx.stop_propagation(); const w = this.where(rk); openConflicts(w.root, w.on); })
-            .child(`${r.conflicts} conflict${r.conflicts === 1 ? "" : "s"}`)))
-          .child(tool("update", `Update${r.behind ? ` ↓${r.behind}` : ""}`, "Fetch, then bring the upstream's commits in: fast-forward, or rebase your commits on top (uncommitted changes are kept). Conflicts open the conflicts dialog.", (_e, cx) => this.update(rk, cx), r.behind > 0, this.busy === "Update")))
+          .child(tool("update", `Update${r.behind ? ` ↓${r.behind}` : ""}`, "Fetch, then bring the upstream's commits in: fast-forward, or rebase your commits on top (uncommitted changes are kept). A Resolve button shows in the header on conflicts.", (_e, cx) => this.update(rk, cx), r.behind > 0, this.busy === "Update")))
         .child(div().id("log-reload").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted)
           .hover((s) => s.bg(t.raised)).tooltip("Reload the log").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); if (rk) this.load(rk, cx); })
           .child(svg("mods/wb-changes/icons/refresh.svg").size(12).when(Boolean(busyLoad), (s) => s.spin(900)))))
