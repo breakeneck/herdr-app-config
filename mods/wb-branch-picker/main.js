@@ -1,14 +1,15 @@
 // Branch picker behind the header's branch chip: all local branches in a tree
 // (groups by their `prefix/`), recently checked-out ones pinned on top, a filter
 // box. A click runs `git checkout` and nothing else — spaces, tabs and terminals
-// never move. The dialog stays open after it, so Fetch (git fetch --prune) can show
-// what's new upstream: each branch shows ↓ behind / ↑ ahead of its upstream.
+// never move. The dialog stays open after it, so Update (gitsync.js: fetch + fast-forward or rebase,
+// conflicts in wb-conflicts) is one click away; each branch shows ↓ behind / ↑ ahead of its upstream.
 // Recent comes from git's reflog, so terminal checkouts count and deleted
 // branches drop out by themselves.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { props, closeOverlay, theme, spaces, panes, exec, setShared } from "herdr";
+import { updateRepo, openConflicts, lastSync, repoKey } from "./gitsync.js";
 
 // Where a space works now: its focused terminal's folder, else the first known one.
 function place(sp, ps) {
@@ -155,7 +156,7 @@ export default class BranchPicker extends View {
         // The branch left goes to the top of Recent; the new current one leaves it.
         if (this.current) this.recents = [this.current, ...this.recents.filter(n => n !== this.current && n !== b.name)].slice(0, RECENTS);
         setShared("wb.branch.switched", Date.now()); // the header chip and the log re-ask on this
-        // Stay open: the new current branch is marked, and Fetch is one click away.
+        // Stay open: the new current branch is marked, and Update is one click away.
         this.current = b.name;
         this.busy = "";
         this.note = `Switched to ${b.name}`;
@@ -168,24 +169,32 @@ export default class BranchPicker extends View {
     });
   }
 
-  fetch(cx) {
+  // Update the current branch (gitsync.js, the same as the log's Update): fetch, then fast-forward or rebase.
+  // A conflict closes this and opens the conflicts dialog.
+  update(cx) {
     if (this.fetching || !this.root) return;
     this.fetching = true; this.error = ""; this.note = "";
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const r = await exec("git", ["fetch", "--prune", "--quiet"], { cwd: this.root, on: this.on, timeout: 180_000 });
-        if (r.code !== 0) this.error = (r.stderr || r.stdout).trim().split("\n").filter(Boolean).pop() || "git fetch failed.";
-        else {
-          await this.load();
-          const cur = this.branches?.find(b => b.name === this.current);
-          this.note = cur?.behind ? `Fetched · ${cur.name} is ${cur.behind} behind its upstream` : "Fetched · up to date";
-          setShared("wb.branch.switched", Date.now()); // the log and the chip show the new ↓/↑
-        }
-      } catch (e) { this.error = String(e?.message ?? e); }
+        const r = await updateRepo(this.root, this.on);
+        this.seenSync = lastSync()?.ts ?? 0; // our own announce: the list reloads right here
+        if (r.conflict) { this.fetching = false; this.close(); openConflicts(this.root, this.on); return; }
+        await this.load();
+        this.note = r.text;
+      } catch (e) { this.error = String(e?.message ?? e); await this.load().catch(() => {}); }
       this.fetching = false;
       cx.notify();
     });
+  }
+
+  // Someone else (the log, the conflicts dialog) moved this repo's refs: the list follows.
+  follow(cx) {
+    const sy = lastSync();
+    if (!sy || !this.root || sy.ts === (this.seenSync ??= sy.ts)) return;
+    this.seenSync = sy.ts;
+    if (sy.rk !== repoKey(this.on, this.root)) return;
+    cx.spawn(async (cx) => { await this.load(); cx.notify(); });
   }
 
   key(e, cx) {
@@ -196,9 +205,11 @@ export default class BranchPicker extends View {
   }
 
   render(cx) {
+    this.follow(cx);
     const t = theme();
     const rows = this.rows();
     const total = (this.branches ?? []).length;
+    const cur = (this.branches ?? []).find(b => b.name === this.current);
     let rowNo = -1;
     const row = (r) => {
       if (r.kind === "head") {
@@ -255,10 +266,10 @@ export default class BranchPicker extends View {
         .when(this.branches, el => el.child(div().text_size(11).text_color(t.dim).child(this.text.trim() ? `${rows.filter(r => r.kind === "row").length}/${total}` : `${total}`)))
         .when(Boolean(this.root), el => el.child(h_flex().id("br-fetch").ml(10).h(24).px(8).gap(5).items_center().rounded(6).border(1).border_color(t.border)
           .text_size(11.5).text_color(this.fetching ? t.dim : t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
-          .tooltip("git fetch --prune: see what's new upstream (your files don't change)")
-          .on_click((_e, cx) => this.fetch(cx))
+          .tooltip(`Update ${this.current ?? "the current branch"}: fetch, then bring its upstream's commits in (fast-forward, or rebase your commits on top). Conflicts open the conflicts dialog.`)
+          .on_click((_e, cx) => this.update(cx))
           .when(this.fetching, el => el.child(svg("mods/wb-branch-picker/icons/spinner.svg").size(11).spin(900)))
-          .child(this.fetching ? "Fetching…" : "Fetch"))))
+          .child(this.fetching ? "Updating…" : `Update${cur?.behind ? ` ↓${cur.behind}` : ""}`))))
       .when(Boolean(this.note) && !this.error, el => el.child(div().text_size(11.5).text_color(t.dim).child(this.note)))
       .when(this.inSub, el => el.child(div().text_size(11).text_color(t.dim).child(`checked out inside ${this.folder.replace(this.root + "/", "")}`)))
       .when(this.branches === undefined, el => el.child(div().text_color(t.muted).child("…")))

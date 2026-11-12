@@ -3,7 +3,7 @@
 // edit it there, then run `scripts/sync-helpers.sh --write` to copy it over the others.
 //
 // shared "wb.ai.models" = [{ id, name, provider: "claude" | "codex" | "local", command?, args?, model, url? }]
-// shared "wb.ai.use"    = { commit: <model id>, review: <model id>, mr: <model id> }  (global default model per use)
+// shared "wb.ai.use"    = { commit: <model id>, review: <model id>, mr: <model id>, conflict: <model id> }  (global default model per use)
 // shared "wb.ai.project" = { [projectKey]: { [use]: { model?, template?, language?, noBlank? } } }
 //   projectKey = "<host>|<path>" of the origin remote (see projectKey()); "*" holds defaults for every project.
 // claude / codex run their CLI (the person's subscription) inside the repo folder, on the repo's
@@ -12,7 +12,7 @@
 import { exec, readTextFile, shared, setShared } from "herdr";
 
 export const MODELS = "wb.ai.models", USE = "wb.ai.use";
-export const USES = [["commit", "Commit messages"], ["review", "PR review"], ["mr", "MR description"]];
+export const USES = [["commit", "Commit messages"], ["review", "PR review"], ["mr", "MR description"], ["conflict", "Merge conflicts"]];
 export const PROJECT = "wb.ai.project";
 export const DEFAULTS = {
   commit: "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it.",
@@ -20,6 +20,8 @@ export const DEFAULTS = {
     + "a short summary of what it changes, then the concrete problems you find (bugs, risks, missing tests, unclear code) as a list, "
     + "each with a file:line reference and why it matters, then optional suggestions. Skip praise and nitpicks; if nothing is wrong, say so briefly. "
     + "Reply with the review only.",
+  conflict: "Keep the intent of both sides: when they change different things, keep both changes; when they really contradict, "
+    + "prefer the upstream side's structure and re-apply the local change on top of it. Never leave conflict markers.",
   mr: "Write a merge request description in GitHub-flavored markdown: a one-paragraph summary of what it changes and why, then a short bullet list of the notable changes, then how to test it if that is not obvious. No title line, no praise.",
 };
 export const LANGUAGES = ["English", "Ukrainian", "Polish", "German", "Spanish", "French"];

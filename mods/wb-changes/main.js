@@ -524,7 +524,7 @@ export default class Changes extends View {
     const genEnabled = Boolean(this.root && !generating && !this.busy && !this.loading && this.context === key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     const sec = S.sectionOf("wb-changes"), ov = S.overlay(sec);
-    const lr = this.log.current(), fetching = this.log.busy === "Fetch";
+    const lr = this.log.current(), fetching = this.log.busy === "Update";
     // The hint goes away when the repo or branch it was for is no longer the one shown.
     if (this.prHint && (this.prHint.id !== this.repoId || (lr?.branch && lr.branch !== this.prHint.branch))) this.prHint = null;
     const hint = this.prHint;
@@ -563,8 +563,8 @@ export default class Changes extends View {
         .when(installed("wb-prs"), (e) => e.child(hbtn("open-prs", "PR", "Pull requests", svg("mods/wb-changes/icons/pr.svg").size(12), popup("wb-prs", 460))))
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`))
-        .child(hbtn("fetch", "", "git fetch --prune: see what's new upstream", fetching ? svg("mods/wb-changes/icons/spinner.svg").size(12).spin(900) : svg("mods/wb-changes/icons/refresh.svg").size(12),
-          (cx) => { if (this.log.cur) this.log.fetch(this.log.cur, cx); }, lr?.behind ? div().text_color(t.accent).child(`↓${lr.behind}`) : null))
+        .child(hbtn("fetch", "", "Update: fetch, then bring the upstream's commits in (fast-forward or rebase; conflicts open the conflicts dialog)", fetching ? svg("mods/wb-changes/icons/spinner.svg").size(12).spin(900) : svg("mods/wb-changes/icons/refresh.svg").size(12),
+          (cx) => { if (this.log.cur) this.log.update(this.log.cur, cx); }, lr?.behind ? div().text_color(t.accent).child(`↓${lr.behind}`) : null))
         .child(div().id("view-menu").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 220, height: 250, props: { viewMenu: true } })).child("⋯")))

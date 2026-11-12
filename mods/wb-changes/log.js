@@ -1,6 +1,7 @@
 // The Log section of the Changes panel (like JetBrains' Git log): the commits of the focused project — its branch
 // together with the upstream, so commits not pulled yet (↓ incoming) and not pushed yet (↑ outgoing) show — or all
-// branches. Fetch (pushing is the Commit and Push button above). Click a commit: its full message and
+// branches. Update (fetch + fast-forward or rebase; conflicts open wb-conflicts); no auto refresh, only a
+// "New · Reload" hint (pushing is the Commit and Push button above). Click a commit: its full message and
 // changed files; click a file: that commit's diff in the main area (wb-diff).
 // Runs git on the project's machine; each repo's last log is cached so a project switch shows at once.
 // The main View drives this helper: init(cx), sync(cx) on render, view(t, opts) for the section.
@@ -8,6 +9,7 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, settings, notify, run, shared, setShared, openOverlay } from "herdr";
+import { updateRepo, openConflicts, lastSync } from "./gitsync.js";
 
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
@@ -71,7 +73,7 @@ export async function prHintFor(root, on) {
   return { id: `${on ?? "local"}:${root}`, branch: b.stdout.trim(), repo: { key: `${remote.host}|${remote.path}`, name: remote.path, host: remote.host, path: remote.path, cwd: root, on: on ?? null } };
 }
 
-const SEP = "\x1f", LIMIT = 400, STALE = 30000, FETCH_EVERY = 5 * 60 * 1000;
+const SEP = "\x1f", LIMIT = 400, FETCH_EVERY = 5 * 60 * 1000;
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
@@ -90,12 +92,13 @@ export class Log {
     this.repos = {}; // `${on}|${root}` -> { root, on, branch, upstream, ahead, behind, commits, incoming, outgoing, me, at, error }
     this.places = new Map(store.get("places", [])); // `${on}|${cwd}` -> `${on}|${root}` (or "" : not a repo)
     this.loc = null; this.cur = null; this.loading = new Set(); this.spinning = new Set(); this.busy = null; this.note = null;
-    this.open = null; this.details = {}; this.query = ""; this.lastFetch = {}; this.lastAll = getPrefs().logAll;
+    this.open = null; this.details = {}; this.query = ""; this.lastFetch = {}; this.newer = new Set(); this.dirty = new Set(); this.lastAll = getPrefs().logAll;
     this.search = InputState.new({ placeholder: "Search: message, task, hash" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     this.follow(cx);
     cx.timer.every(2000, (cx) => this.follow(cx)); // a `cd` in a terminal; render catches space switches
-    cx.timer.every(60 * 1000, (cx) => { if (this.cur) this.load(this.cur, cx, true); });
+    // No auto refresh: once a minute only a cheap look whether refs moved, shown as "New · Reload".
+    cx.timer.every(60 * 1000, (cx) => { if (this.cur) this.check(this.cur, cx); });
   }
 
   current() { return this.cur ? this.repos[this.cur] ?? null : null; }
@@ -104,12 +107,19 @@ export class Log {
   sync(cx) {
     const loc = location(), all = getPrefs().logAll;
     // A checkout (branch picker, the chip) or a fetch elsewhere: the log reloads for the new HEAD.
-    const switched = Number(shared("wb.branch.switched") ?? 0);
-    const moved = `${loc.on}|${loc.cwd}` !== this.loc, flipped = all !== this.lastAll, headMoved = switched !== (this.lastSwitch ??= switched);
-    if ((moved || flipped || headMoved) && !this.soon) {
+    // A person's fetch/update/continue anywhere (gitsync.js: the branch picker, the conflicts dialog, this log):
+    // that repo reloads now — one source of truth for every git mod.
+    const switched = Number(shared("wb.branch.switched") ?? 0), sy = lastSync(), syTs = sy?.ts ?? 0;
+    const moved = `${loc.on}|${loc.cwd}` !== this.loc, flipped = all !== this.lastAll;
+    const headMoved = switched !== (this.lastSwitch ??= switched), synced = syTs !== (this.lastSyncTs ??= syTs);
+    if ((moved || flipped || headMoved || synced) && !this.soon) {
       this.soon = true;
       cx.spawn(async (cx) => {
         this.soon = false;
+        if (syTs !== this.lastSyncTs) {
+          this.lastSyncTs = syTs;
+          if (sy.rk === this.cur) this.load(this.cur, cx, true); else this.dirty.add(sy.rk);
+        }
         if (switched !== this.lastSwitch) { this.lastSwitch = switched; this.open = null; if (this.cur) this.load(this.cur, cx, true); }
         if (all !== this.lastAll) { this.lastAll = all; if (this.cur) this.load(this.cur, cx); }
         this.follow(cx);
@@ -117,7 +127,8 @@ export class Log {
     }
   }
 
-  // The focused place moved: its repo's cached log at once, then a fresh one (and a quiet fetch now and then).
+  // The focused place moved: its repo's cached log at once; a fresh one only when there's none, it was
+  // changed by an action elsewhere, or the scope differs — else just a look whether something is new.
   follow(cx) {
     const loc = location(), lk = `${loc.on}|${loc.cwd}`;
     if (lk === this.loc) return;
@@ -125,8 +136,9 @@ export class Log {
     const show = (rk) => {
       this.cur = rk || null;
       if (rk && !this.repos[rk]) { const c = store.get(`log:${rk}`, null); if (c) this.repos[rk] = c; }
-      if (rk && (!this.repos[rk] || this.repos[rk].all !== getPrefs().logAll || Date.now() - (this.repos[rk].at ?? 0) > STALE)) this.load(rk, cx, Boolean(this.repos[rk]));
-      if (rk && Date.now() - (this.lastFetch[rk] ?? 0) > FETCH_EVERY) this.fetch(rk, cx, true);
+      if (rk && (!this.repos[rk] || this.repos[rk].all !== getPrefs().logAll || this.dirty.has(rk))) this.load(rk, cx, Boolean(this.repos[rk]));
+      else if (rk) this.check(rk, cx);
+      if (rk && Date.now() - (this.lastFetch[rk] ?? 0) > FETCH_EVERY) this.bgFetch(rk, cx);
       cx.notify();
     };
     if (this.places.has(lk)) return show(this.places.get(lk));
@@ -153,7 +165,8 @@ export class Log {
       const prev = this.repos[rk] ?? {};
       try {
         const g = (args) => this.git(rk, [...READ, ...args]);
-        const [head, up, me] = await Promise.all([g(["rev-parse", "--abbrev-ref", "HEAD"]), g(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), g(["config", "user.name"])]);
+        this.dirty.delete(rk);
+        const [head, up, me, sig, unmerged] = await Promise.all([g(["rev-parse", "--abbrev-ref", "HEAD"]), g(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), g(["config", "user.name"]), this.sig(rk), g(["diff", "--name-only", "--diff-filter=U"])]);
         const branch = head.stdout.trim(), upstream = up.code === 0 ? up.stdout.trim() : null;
         let ahead = 0, behind = 0, incoming = [], outgoing = [];
         if (upstream) {
@@ -169,7 +182,9 @@ export class Log {
           const [hash, short, author, at, subject, decor] = l.split(SEP);
           return { hash, short, author, at: Number(at), subject, refs: decor ? decor.split(", ").filter((x) => x && x !== "HEAD") : [], head: /(^|, )HEAD( ->|$|,)/.test(decor) };
         });
-        this.repos[rk] = { branch, upstream, ahead: ahead || 0, behind: behind || 0, commits, incoming, outgoing, all, me: me.code === 0 ? me.stdout.trim() : "", at: Date.now(), error: null };
+        this.repos[rk] = { branch, upstream, ahead: ahead || 0, behind: behind || 0, commits, incoming, outgoing, all, me: me.code === 0 ? me.stdout.trim() : "", at: Date.now(), error: null,
+          sig, conflicts: unmerged.stdout.split("\n").filter(Boolean).length };
+        this.newer.delete(rk);
         store.set(`log:${rk}`, this.repos[rk]);
       } catch (e) { this.repos[rk] = { ...prev, error: String(e.message ?? e) }; }
       finally {
@@ -180,31 +195,44 @@ export class Log {
     });
   }
 
-  // One git action with its progress shown; the log reloads after it.
-  action(rk, label, args, cx, { quiet = false, onFail, onOk } = {}) {
-    if (this.busy) return;
-    // A quiet action (the periodic fetch) holds busy under its own name, so no button spins for it.
-    const mark = quiet ? `auto:${label}` : label;
-    this.busy = mark; if (!quiet) this.note = null; cx.notify();
+  // What the log was drawn from: HEAD and every branch tip. A change means something new to show.
+  async sig(rk) {
+    const r = await this.git(rk, [...READ, "for-each-ref", "--format=%(objectname)", "refs/heads", "refs/remotes"]).catch(() => null);
+    const h = await this.git(rk, [...READ, "rev-parse", "HEAD"]).catch(() => null);
+    return `${h?.stdout.trim() ?? ""}:${r?.stdout.replace(/\s+/g, " ").trim() ?? ""}`;
+  }
+  check(rk, cx) {
+    const r = this.repos[rk];
+    if (!r?.sig || this.loading.has(rk)) return;
     cx.spawn(async (cx) => {
-      try {
-        const r = await this.git(rk, args, { timeout: 180000 });
-        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `${label} failed`).trim().split("\n").slice(-3).join(" "));
-        if (!quiet) this.note = { ok: true, text: `${label}: ${(r.stdout || r.stderr || "done").trim().split("\n").pop()}` };
-        // Something that moved HEAD: the Changes panel and the branch chip ask again.
-        this.lastSwitch = Date.now(); setShared("wb.branch.switched", this.lastSwitch);
-        onOk?.();
-      } catch (e) {
-        if (onFail) { this.busy = null; onFail(String(e.message ?? e), cx); return; }
-        if (!quiet) this.note = { ok: false, text: `${label} failed: ${e.message ?? e}` };
-      } finally {
-        if (this.busy === mark) this.busy = null;
-        this.load(rk, cx, quiet); cx.notify();
-      }
+      const now = await this.sig(rk);
+      if (now && now !== this.repos[rk]?.sig && !this.newer.has(rk)) { this.newer.add(rk); cx.notify(); }
+    });
+  }
+  // A quiet fetch now and then, so "New" can also mean new upstream commits; it never redraws the log.
+  bgFetch(rk, cx) {
+    this.lastFetch[rk] = Date.now();
+    cx.spawn(async (cx) => {
+      await this.git(rk, ["fetch", "--prune", "--quiet"], { timeout: 180000 }).catch(() => null);
+      this.check(rk, cx);
     });
   }
 
-  fetch(rk, cx, quiet = false) { this.lastFetch[rk] = Date.now(); this.action(rk, "Fetch", ["fetch", "--prune", "--quiet"], cx, { quiet }); }
+  // Update (gitsync.js): fetch, then fast-forward or rebase onto the upstream; a conflict opens the dialog.
+  update(rk, cx) {
+    if (this.busy) return;
+    const { on, root } = this.where(rk);
+    this.busy = "Update"; this.note = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await updateRepo(root, on);
+        this.note = { ok: !r.conflict, text: r.text };
+        if (r.conflict) openConflicts(root, on);
+      } catch (e) { this.note = { ok: false, text: `Update failed: ${e.message ?? e}` }; }
+      this.busy = null; this.lastFetch[rk] = Date.now();
+      this.load(rk, cx, true); cx.notify();
+    });
+  }
 
   toggle(c, cx) {
     this.open = this.open === c.hash ? null : c.hash;
@@ -304,7 +332,12 @@ export class Log {
             .when(Boolean(r.upstream), (e) => e.child(div().min_w(0).truncate().text_color(t.dim).child(`→ ${r.upstream}`)))
             .when(!r.upstream, (e) => e.child(div().flex_none().text_color(t.dim).child("no upstream")))))
         .when(Boolean(r && !r.error && rk), (e) => e
-          .child(tool("fetch", `Fetch${r.behind ? ` ↓${r.behind}` : ""}`, "git fetch --prune: see what's new upstream (nothing in your working tree changes)", (_e, cx) => this.fetch(rk, cx), r.behind > 0, this.busy === "Fetch")))
+          .when(Boolean(this.newer.has(rk)), (e) => e.child(tool("newer", "● New · Reload", "Commits or branches moved since this log was drawn", (_e, cx) => this.load(rk, cx), true)))
+          .when(r.conflicts > 0, (e) => e.child(h_flex().id("conflicts").h(22).px(7).flex_none().items_center().rounded(6).cursor_pointer().border_1().border_color(t.blocked)
+            .text_size(11).text_color(t.blocked).hover((s) => s.bg(t.hover)).tooltip("Resolve the merge conflicts").on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => { cx.stop_propagation(); const w = this.where(rk); openConflicts(w.root, w.on); })
+            .child(`${r.conflicts} conflict${r.conflicts === 1 ? "" : "s"}`)))
+          .child(tool("update", `Update${r.behind ? ` ↓${r.behind}` : ""}`, "Fetch, then bring the upstream's commits in: fast-forward, or rebase your commits on top (uncommitted changes are kept). Conflicts open the conflicts dialog.", (_e, cx) => this.update(rk, cx), r.behind > 0, this.busy === "Update")))
         .child(div().id("log-reload").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted)
           .hover((s) => s.bg(t.raised)).tooltip("Reload the log").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); if (rk) this.load(rk, cx); })
           .child(svg("mods/wb-changes/icons/refresh.svg").size(12).when(Boolean(busyLoad), (s) => s.spin(900)))))
