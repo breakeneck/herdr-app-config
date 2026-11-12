@@ -534,7 +534,7 @@ export default class Changes extends View {
       .child(icon).child(label).when(Boolean(extra), (e) => e.child(extra));
     // The popup gets this place and its origin remote, found here: a popup copy starts with empty storage,
     // and its own lookup on start proved unreliable, so it would sit on "open a project folder".
-    const popup = (mod, width) => (_e, cx) => cx.spawn(async () => {
+    const popup = (mod, width) => (cx) => cx.spawn(async () => {
       const loc = location(), lk = `${loc.on}|${loc.cwd}`;
       const o = this.root ? await exec("git", ["remote", "get-url", "origin"], { cwd: this.root, on: this.on ?? null }).catch(() => null) : null;
       const remote = o?.code === 0 ? remoteOf(o.stdout.trim()) : null;
