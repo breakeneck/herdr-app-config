@@ -72,6 +72,8 @@ const REQUEST = "wb.files.request";
 // The panel's own clipboard ({ on, paths: absolute, sys: the local copies on the system clipboard, or null
 // while they're made }) and menu actions sent from the popup ({ action, ts, ... }).
 const CLIP = "wb.files.clip", ACTION = "wb.files.action";
+// The folder last downloaded into (the menu offers it again); Downloads until one is picked.
+const DL_DIR = "wb.files.downloadDir";
 const same = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i]);
 function openInMain(root, on, path) {
   const space = spaces().find((s) => s.active);
@@ -269,6 +271,7 @@ export default class Files extends View {
     this.job(`Downloading ${rels.length === 1 ? rels[0].split("/").pop() : rels.length + " items"}…`, async () => {
       const target = dir ?? await pickFolder({ prompt: "Download to" });
       if (!target) return null;
+      setShared(DL_DIR, target);
       const names = await T.transfer(on, paths, null, target);
       if (names.length) await T.reveal(`${target}/${names[0]}`);
       return `Downloaded ${names.length === 1 ? names[0] : names.length + " items"}`;
@@ -280,7 +283,7 @@ export default class Files extends View {
     if (!this.sel.has(path)) this.sel = new Set([path]);
     this.handle.focus();
     const paths = [...this.sel];
-    openOverlay({ mod: "wb-files", kind: "popup", width: 240, height: 6 * 30 + 14,
+    openOverlay({ mod: "wb-files", kind: "popup", width: 260, height: 6 * 30 + 14 + 9,
       props: { menu: { root: this.root, on: this.on ?? null, paths, label: paths.length === 1 ? path.split("/").pop() : `${paths.length} items`, dir } } });
     cx.notify();
   }
@@ -294,11 +297,13 @@ export default class Files extends View {
       .text_size(12.5).hover((s) => s.bg(t.hover))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => action(cx))
       .child(div().flex_1().min_w(0).truncate().child(label)).when(Boolean(hint), (e) => e.child(div().text_size(11).text_color(t.dim).child(hint)));
+    const last = shared(DL_DIR) || T.downloads(), lastName = last.split("/").filter(Boolean).pop() || last;
     return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
+      .child(item("fm-dlto", "Download…", "choose folder", () => act("downloadTo")))
+      .child(item("fm-dl", `Download to ${lastName}`, null, () => act("download")))
+      .child(div().h(1).mx(6).my(4).bg(t.border))
       .child(item("fm-copy", `Copy ${m.label}`, "⌘C", () => act("copy")))
       .child(item("fm-paste", m.dir ? "Paste into folder" : "Paste here", "⌘V", () => act("paste")))
-      .child(item("fm-dl", "Download to Downloads", null, () => act("download")))
-      .child(item("fm-dlto", "Download to…", null, () => act("downloadTo")))
       .child(item("fm-path", "Copy path", null, (cx) => { cx.write_to_clipboard(m.paths.map((p) => `${m.root}/${p}`).join("\n")); close(); }))
       .child(item("fm-reveal", m.on ? `On ${m.on}` : "Reveal in Finder", null, () => { if (!m.on) T.reveal(`${m.root}/${m.paths[0]}`); close(); }));
   }
@@ -311,7 +316,7 @@ export default class Files extends View {
     if (a.root !== this.root || (a.on ?? null) !== (this.on ?? null)) return;
     if (a.action === "copy") this.copy(a.paths, cx);
     else if (a.action === "paste") this.paste(this.pasteTarget(), cx);
-    else if (a.action === "download") this.download(a.paths, T.downloads(), cx);
+    else if (a.action === "download") this.download(a.paths, shared(DL_DIR) || T.downloads(), cx);
     else if (a.action === "downloadTo") this.download(a.paths, null, cx);
   }
 
