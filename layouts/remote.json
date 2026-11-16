@@ -32,7 +32,7 @@
                 "mod": "wb-spaces"
               },
               "size": {
-                "weight": 0.8716126084327698
+                "weight": 0.7329317927360535
               },
               "min": 90
             },
@@ -43,7 +43,7 @@
                 "mod": "wb-files"
               },
               "size": {
-                "weight": 1.128387451171875
+                "weight": 1.2670682668685913
               },
               "min": 90
             },
@@ -165,11 +165,10 @@
                 }
               ],
               "size": {
-                "px": 333
+                "px": 506
               },
               "min": 280,
-              "max": 900,
-              "hidden": true
+              "max": 900
             }
           ],
           "padding": 8,
@@ -188,16 +187,16 @@
         {
           "id": "prs-host",
           "type": "block",
-          "size": {
-            "px": 0
-          },
-          "min": 0,
           "content": {
             "mod": "wb-prs",
             "props": {
               "host": true
             }
-          }
+          },
+          "size": {
+            "px": 0
+          },
+          "min": 0
         }
       ],
       "resizable": false
