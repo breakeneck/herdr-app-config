@@ -1,7 +1,10 @@
 // A lazy file browser for the focused pane's folder; a clicked file opens read-only in the main area (props.view: that viewer tab).
+// Files move between this computer and the space's machine (transfer.js): drop files from Finder onto a folder
+// (or the list) to upload them there; ⌘C / ⌘V copy and paste, also to and from Finder; right-click → Download.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, shared, setShared, props, run, notify } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, shared, setShared, props, run, notify, openOverlay, closeOverlay, pickFolder, checking } from "herdr";
+import * as T from "./transfer.js";
 import * as S from "./section.js";
 import { colorOf } from "./colors.js";
 
@@ -66,6 +69,10 @@ function base64(text) {
 // A clicked file opens in the main area as a tab (one viewer tab per space, reused: a new click sends it
 // a request through shared state, like the diff tab). The viewer is this mod with props.view.
 const REQUEST = "wb.files.request";
+// The panel's own clipboard ({ on, paths: absolute, sys: the local copies on the system clipboard, or null
+// while they're made }) and menu actions sent from the popup ({ action, ts, ... }).
+const CLIP = "wb.files.clip", ACTION = "wb.files.action";
+const same = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i]);
 function openInMain(root, on, path) {
   const space = spaces().find((s) => s.active);
   const req = { view: true, space: space?.id ?? null, root, on: on ?? null, path, ts: Date.now() };
@@ -79,10 +86,12 @@ function openInMain(root, on, path) {
 
 export default class Files extends View {
   init(_props, cx) {
+    if (props()?.menu) return;
     if (props()?.view) { this.viewer = true; this.req = props(); this.root = this.req.root; this.on = this.req.on; this.show(this.req.path, cx); return; }
     S.migrateKeys(["sections.collapsed"]);
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.sel = new Set(); this.handle = cx.focus_handle(); this.status = null; this.busy = 0; this.lastAction = Date.now();
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
   }
@@ -116,7 +125,7 @@ export default class Files extends View {
       if (this.context) this.saved.set(this.context.key, { folders: this.folders });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.watched = null; this.error = null; this.limited = false;
+      this.pending = new Set(); this.marks = {}; this.sel = new Set(); this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
     }
     if (!cwd || this.loading) return;
@@ -191,13 +200,139 @@ export default class Files extends View {
     });
   }
 
+  // Where a paste lands: the selected folder, else the selected file's folder, else the list's root ("").
+  pasteTarget() {
+    const last = [...this.sel].pop();
+    if (last == null) return "";
+    const parent = last.includes("/") ? last.slice(0, last.lastIndexOf("/")) : "";
+    return (this.entries.get(parent) ?? []).find((e) => e.name === last.split("/").pop())?.dir ? last : parent;
+  }
+  full(rel) { return rel ? `${this.root}/${rel}` : this.root; }
+
+  // One file operation at a time shows in the footer; failures toast. The list refreshes after.
+  job(label, work, cx) {
+    if (!this.root) return;
+    this.busy++; this.status = label; cx.notify();
+    cx.spawn(async (cx) => {
+      try { const done = await work(); this.status = done ?? null; }
+      catch (e) { this.status = null; notify({ title: label.replace(/…$/, "") + " failed", body: String(e.message ?? e), level: "error" }); }
+      finally { this.busy--; this.refresh(cx); cx.notify(); }
+      if (this.status && !this.busy) { const s = this.status; cx.timer?.after?.(4000, (cx) => { if (this.status === s) { this.status = null; cx.notify(); } }); }
+    });
+  }
+
+  // Finder files dropped on a folder row (or a file's folder, or the list): copied there, here or remote.
+  upload(paths, rel, cx) {
+    if (!paths?.length || !this.root) return;
+    const on = this.on, dir = this.full(rel), n = paths.length;
+    this.job(`${on ? "Uploading" : "Copying"} ${n === 1 ? paths[0].split("/").pop() : n + " items"}…`, async () => {
+      const names = await T.transfer(null, paths, on, dir);
+      if (rel) this.folders.add(rel);
+      return `${on ? "Uploaded" : "Copied"} ${names.length === 1 ? names[0] : names.length + " items"}`;
+    }, cx);
+  }
+
+  // ⌘C: the panel's clipboard, and the system's too (remote files as local copies), so Finder can paste them.
+  copy(rels, cx) {
+    if (!rels.length || !this.root) return;
+    const on = this.on ?? null, paths = rels.map((r) => this.full(r)), ts = Date.now();
+    setShared(CLIP, { on, paths, sys: null, ts });
+    const what = rels.length === 1 ? rels[0].split("/").pop() : `${rels.length} items`;
+    if (!T.clipboardFiles()) { this.status = `Copied ${what}`; cx.notify(); return; }
+    this.job(on ? `Copying ${what} from ${on}…` : `Copying ${what}…`, async () => {
+      let sys = [];
+      try { sys = on ? await T.stageLocally(on, paths) : paths; if (!(await T.writeClipboardFiles(sys))) sys = []; }
+      finally { if (shared(CLIP)?.ts === ts) setShared(CLIP, { on, paths, sys, ts }); }
+      return `Copied ${what}`;
+    }, cx);
+  }
+
+  // ⌘V: Finder's copied files, or the panel's own (straight from machine to machine when they're the newest).
+  paste(rel, cx) {
+    if (!this.root) return;
+    const on = this.on ?? null, dir = this.full(rel);
+    this.job("Pasting…", async () => {
+      const sys = await T.readClipboardFiles(), clip = shared(CLIP);
+      const own = clip && (!sys.length || clip.sys === null || same(sys, clip.sys));
+      const from = own ? clip.on : null, paths = own ? clip.paths : sys;
+      if (!paths.length) return "Nothing to paste";
+      const names = await T.transfer(from, paths, on, dir);
+      if (rel) this.folders.add(rel);
+      return `Pasted ${names.length === 1 ? names[0] : names.length + " items"}`;
+    }, cx);
+  }
+
+  // Remote (or local) files into a folder on this computer: Downloads, or one picked.
+  download(rels, dir, cx) {
+    if (!rels.length || !this.root) return;
+    const on = this.on ?? null, paths = rels.map((r) => this.full(r));
+    this.job(`Downloading ${rels.length === 1 ? rels[0].split("/").pop() : rels.length + " items"}…`, async () => {
+      const target = dir ?? await pickFolder({ prompt: "Download to" });
+      if (!target) return null;
+      const names = await T.transfer(on, paths, null, target);
+      if (names.length) await T.reveal(`${target}/${names[0]}`);
+      return `Downloaded ${names.length === 1 ? names[0] : names.length + " items"}`;
+    }, cx);
+  }
+
+  menu(path, dir, cx) {
+    cx.stop_propagation();
+    if (!this.sel.has(path)) this.sel = new Set([path]);
+    this.handle.focus();
+    const paths = [...this.sel];
+    openOverlay({ mod: "wb-files", kind: "popup", width: 240, height: 6 * 30 + 14,
+      props: { menu: { root: this.root, on: this.on ?? null, paths, label: paths.length === 1 ? path.split("/").pop() : `${paths.length} items`, dir } } });
+    cx.notify();
+  }
+
+  // The right-click menu (a popup copy): its choice goes back to the list as a shared action, so the
+  // copy or download keeps running after the popup closes.
+  menuView() {
+    const t = theme(), m = props().menu, close = () => closeOverlay(props()?.overlay);
+    const act = (action) => { setShared(ACTION, { action, root: m.root, on: m.on, paths: m.paths, ts: Date.now() }); close(); };
+    const item = (id, label, hint, action) => h_flex().id(id).h(30).px(10).gap(8).items_center().rounded(6).cursor_pointer()
+      .text_size(12.5).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => action(cx))
+      .child(div().flex_1().min_w(0).truncate().child(label)).when(Boolean(hint), (e) => e.child(div().text_size(11).text_color(t.dim).child(hint)));
+    return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
+      .child(item("fm-copy", `Copy ${m.label}`, "⌘C", () => act("copy")))
+      .child(item("fm-paste", m.dir ? "Paste into folder" : "Paste here", "⌘V", () => act("paste")))
+      .child(item("fm-dl", "Download to Downloads", null, () => act("download")))
+      .child(item("fm-dlto", "Download to…", null, () => act("downloadTo")))
+      .child(item("fm-path", "Copy path", null, (cx) => { cx.write_to_clipboard(m.paths.map((p) => `${m.root}/${p}`).join("\n")); close(); }))
+      .child(item("fm-reveal", m.on ? `On ${m.on}` : "Reveal in Finder", null, () => { if (!m.on) T.reveal(`${m.root}/${m.paths[0]}`); close(); }));
+  }
+
+  // A menu choice from the popup, for the folder this list shows.
+  takeAction(cx) {
+    const a = shared(ACTION);
+    if (!a || a.ts <= this.lastAction) return;
+    this.lastAction = a.ts;
+    if (a.root !== this.root || (a.on ?? null) !== (this.on ?? null)) return;
+    if (a.action === "copy") this.copy(a.paths, cx);
+    else if (a.action === "paste") this.paste(this.pasteTarget(), cx);
+    else if (a.action === "download") this.download(a.paths, T.downloads(), cx);
+    else if (a.action === "downloadTo") this.download(a.paths, null, cx);
+  }
+
   rows(prefix, depth, out, t) {
     if (out.length >= TOTAL || depth > 40) return out;
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
-      out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : openInMain(this.root, this.on, path))
+      const selected = this.sel.has(path), parent = prefix;
+      out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer()
+        .when(selected, s => s.bg(t.selected)).hover(s => s.bg(selected ? t.selected : t.hover))
+        // Dragging a row onto a terminal types its path there (Herdr only drops onto terminals).
+        .drag_paths((selected ? [...this.sel] : [path]).map((p) => `${this.root}/${p}`), { on: this.on ?? null })
+        .on_drop((e, cx) => { cx.stop_propagation(); this.upload(e.paths, entry.dir ? path : parent, cx); })
+        .on_mouse_down("right", (_e, cx) => this.menu(path, entry.dir, cx))
+        .on_click((e, cx) => {
+          cx.stop_propagation(); this.handle.focus();
+          if (e.modifiers?.platform || e.modifiers?.control) { this.sel.has(path) ? this.sel.delete(path) : this.sel.add(path); cx.notify(); return; }
+          this.sel = new Set([path]);
+          entry.dir ? this.toggle(path, cx) : (openInMain(this.root, this.on, path), cx.notify());
+        })
         .child(entry.dir ? svg(`mods/wb-files/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/wb-files/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
@@ -270,8 +405,10 @@ export default class Files extends View {
   }
 
   render(cx) {
+    if (props()?.menu) return this.menuView();
     if (this.viewer) return this.viewerView(cx);
     if (key() !== this.context?.key) this.refresh(cx);
+    this.takeAction(cx);
     const t = theme(), sec = S.sectionOf("wb-files"), ov = S.overlay(sec);
     // The header wears the active project's color (its tile in the Spaces list), so the project shows at a glance.
     const sp = spaces().find((s) => s.active);
@@ -282,9 +419,23 @@ export default class Files extends View {
         .child(S.mark(sec))
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(fill ? "#ffffffcc" : t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
-      .child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+      .child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
+        .track_focus(this.handle)
+        .on_key_down((e, cx) => {
+          const mod = e.modifiers?.platform || e.modifiers?.control;
+          if (!mod || e.modifiers?.shift || e.modifiers?.alt) return;
+          if (e.key === "c") { cx.stop_propagation(); this.copy([...this.sel], cx); }
+          else if (e.key === "v") { cx.stop_propagation(); this.paste(this.pasteTarget(), cx); }
+        })
+        // A click on empty space clears the selection, so ⌘V goes to the root; a Finder drop there lands in the root.
+        .on_click((_e, cx) => { this.handle.focus(); if (this.sel.size) { this.sel = new Set(); cx.notify(); } })
+        .on_drop((e, cx) => this.upload(e.paths, "", cx))
+        .children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))))
+      .when(Boolean(this.status), el => el.child(h_flex().h(26).flex_none().px(12).gap(6).items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.muted)
+        .when(this.busy > 0, e => e.child(div().flex_none().text_color(t.accent).frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
+        .child(div().flex_1().min_w(0).truncate().child(this.status))))
       .when(Boolean(ov), el => el.child(ov));
   }
 }
