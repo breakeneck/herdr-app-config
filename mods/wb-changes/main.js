@@ -188,12 +188,14 @@ export default class Changes extends View {
           for (let i = 0; i + 1 < parts.length; i += 2) tracked.push(`${parts[i][0] === "U" ? "UU" : parts[i][0] + " "} ${parts[i + 1]}`);
           entries = [...tracked, ...entries.filter((e) => e.startsWith("??"))];
         }
+        // In branch scope the list holds committed work too: only what status reports can be committed.
+        const uncommitted = new Set(status.stdout.split("\0").filter(Boolean).map((e) => e.slice(3)));
         for (const entry of entries.slice(0, 1000)) {
           const xy = entry.slice(0, 2), path = entry.slice(3), fresh = xy === "??";
           const conflict = xy.includes("U") || xy === "AA" || xy === "DD";
           const s = conflict ? "U" : xy.includes("D") ? "D" : fresh || xy.includes("A") ? "A" : "M";
           const stat = stats[path] ?? { add: 0, del: 0 };
-          files.push({ path, status: s, fresh, ...stat });
+          files.push({ path, status: s, fresh, dirty: !base || uncommitted.has(path), ...stat });
         }
         if (stale()) return;
         { const id = repoIdOf(on, root); if (baseNow(id) !== base) setShared(BASE_NOW, { ...(typeof shared(BASE_NOW) === "object" ? shared(BASE_NOW) : {}), [id]: base }); }
@@ -227,6 +229,8 @@ export default class Changes extends View {
   // Commit selection: paths the person unchecked, per repo, in memory (so new files start checked).
   unc() { const k = this.repoId ?? ""; if (!this.unchecked.has(k)) this.unchecked.set(k, new Set()); return this.unchecked.get(k); }
   checkedFiles() { const u = this.unc(); return this.files.filter((f) => !u.has(f.path)); }
+  // What Commit takes: the checked files with uncommitted changes (branch scope lists committed ones too).
+  toCommit() { return this.checkedFiles().filter((f) => f.dirty !== false); }
   setChecked(paths, on, cx) {
     const u = this.unc();
     for (const p of paths) if (on) u.delete(p); else u.add(p);
@@ -394,10 +398,10 @@ export default class Changes extends View {
   }
 
   commit(cx) {
-    if (!this.message.trim() || !this.checkedFiles().length || !this.root || this.busy || this.loading || this.context !== key()) return;
+    if (!this.message.trim() || !this.toCommit().length || !this.root || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim(), id = this.repoId, push = commitAction() === "push";
     // Everything checked: stage all. Otherwise stage and commit just the checked paths (literal, not globs).
-    const picked = this.checkedFiles().map((f) => f.path), partial = picked.length < this.files.length;
+    const picked = this.toCommit().map((f) => f.path), partial = picked.length < this.files.filter((f) => f.dirty !== false).length;
     this.busy = true; this.note = null; this.phase = "Committing…";
     cx.spawn(async (cx) => {
       try {
@@ -603,7 +607,8 @@ export default class Changes extends View {
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree", unc = this.unc();
     const nChecked = this.files.filter((f) => !unc.has(f.path)).length, total = this.files.length, allState = nChecked === 0 ? 0 : nChecked === total ? 1 : 2;
-    const enabled = Boolean(this.message.trim() && nChecked && this.root && !this.busy && !this.loading);
+    const nCommit = this.toCommit().length, nothingNew = this.scope === "base" && total > 0 && !this.files.some((f) => f.dirty !== false);
+    const enabled = Boolean(this.message.trim() && nCommit && this.root && !this.busy && !this.loading);
     const generating = running(this.repoId);
     const genEnabled = Boolean(this.root && !generating && !this.busy && !this.loading && this.context === key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
@@ -703,7 +708,7 @@ export default class Changes extends View {
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 130, props: { menu: true, project: this.pk } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           .child(h_flex().id("commit").h(30).flex_none().rounded(8).overflow_hidden().bg(enabled ? t.solid : t.raised)
-            .child(h_flex().id("commit-run").px(14).h_full().items_center().text_size(12).text_color(enabled ? t.solid_foreground : t.dim).when(enabled, (e) => e.cursor_pointer()).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.commit(cx))
+            .child(h_flex().id("commit-run").px(14).h_full().items_center().text_size(12).text_color(enabled ? t.solid_foreground : t.dim).when(enabled, (e) => e.cursor_pointer()).when(nothingNew, (e) => e.tooltip(`Nothing uncommitted: these files are the branch's commits vs ${this.base}`)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.commit(cx))
               .tooltip((commitAction() === "push" ? "Commit the checked files with this message, then push to the same-named branch on origin" : "Commit the checked files with this message") + (nChecked ? "" : " · nothing checked"))
               .child(this.busy ? (this.phase ?? "Committing…") : commitAction() === "push" ? "Commit and Push" : "Commit"))
             .child(div().id("commit-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(enabled ? t.solid_foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Commit or Commit and Push").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 190, height: 74, props: { commitMenu: true } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))))
