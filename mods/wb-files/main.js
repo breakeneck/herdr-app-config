@@ -7,6 +7,13 @@ import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder,
 import * as T from "./transfer.js";
 import * as S from "./section.js";
 import { colorOf } from "./colors.js";
+import { blame, label, tooltip, tint as ageTint, openCommit, BLAME_W } from "./blame.js";
+import { highlight, languageFor } from "./highlight.js";
+
+// Annotate with Git Blame in the viewer tab: the Blame button (or the gutter's right-click menu) swaps the editor
+// for a read-only annotated copy of the saved file, opened at the cursor's line. The native editor has no gutter
+// hooks, so annotations can't sit beside it. "wb.blame.close" = a timestamp the gutter menu sets to turn it off.
+const AROW = 18, ACHAR = 12 * 0.6;
 
 
 function location() {
@@ -88,7 +95,7 @@ function openInMain(root, on, path) {
 
 export default class Files extends View {
   init(_props, cx) {
-    if (props()?.menu) return;
+    if (props()?.menu || props()?.gutterMenu) return;
     if (props()?.view) { this.viewer = true; this.req = props(); this.root = this.req.root; this.on = this.req.on; this.show(this.req.path, cx); return; }
     S.migrateKeys(["sections.collapsed"]);
     this.saved = new Map();
@@ -180,6 +187,7 @@ export default class Files extends View {
 
   show(path, cx) {
     this.code?.release(); this.code = null; this.file = path; this.fileError = null;
+    this.annotate = false; this.ann = null; this.annError = null;
     if (!path || !cx) return;
     const context = this.context, root = this.root, on = this.on;
     cx.spawn(async cx => {
@@ -378,6 +386,67 @@ export default class Files extends View {
     } finally { this.saving = false; }
   }
 
+  // Blame on: the saved file's lines with who changed each and when, from `git blame` (its text comes with it).
+  toggleAnnotate(cx) {
+    if (this.annotate) { this.annotate = false; this.ann = null; cx.notify(); return; }
+    if (!this.file || !this.root) return;
+    let line = 0;
+    try { const v = this.code?.value() ?? "", at = this.code?.selected_range()?.start ?? 0; line = v.slice(0, at).split("\n").length - 1; } catch {}
+    const path = this.file, root = this.root, on = this.on;
+    this.annotate = true; this.ann = null; this.annError = null; this.annSince = Date.now(); this.annY = 0; this.annLine = line;
+    cx.spawn(async (cx) => {
+      try {
+        const lines = await blame({ root, on, path });
+        if (!this.annotate || this.file !== path) return;
+        this.ann = lines; this.lang = languageFor(path);
+        this.annW = Math.min(4000, Math.max(20, ...lines.slice(0, 20000).map((l) => l.text.length)) * ACHAR + 40);
+        this.annY = Math.max(0, (this.annLine - Math.floor((this.annH || 400) / 3 / AROW)) * AROW);
+      } catch (e) { if (this.file === path) this.annError = String(e.message ?? e).split("\n")[0]; }
+      cx.notify();
+    });
+    cx.notify();
+  }
+
+  gutterMenuView() {
+    const t = theme();
+    return v_flex().p(6).w_full().bg(t.raised).text_color(t.foreground)
+      .child(h_flex().id("gm-blame").h(30).px(8).gap(8).items_center().rounded(6).cursor_pointer().text_size(12.5).hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click(() => { setShared("wb.blame.close", Date.now()); closeOverlay(props()?.overlay); })
+        .child(div().w(14).text_color(t.accent).child("✓")).child("Annotate with Git Blame"));
+  }
+
+  // The annotated file: the gutter (date and author, tinted by age; a click shows the commit) and the code.
+  annotatedView(t) {
+    const z = settings().zoom || 1, lines = this.ann ?? [], H = this.annH || 400;
+    const total = lines.length * AROW, max = Math.max(0, total - H), off = Math.min(this.annY ?? 0, max);
+    const first = Math.floor(off / AROW), last = Math.min(lines.length, Math.ceil((off + H) / AROW));
+    const where = { root: this.root, on: this.on, path: this.file };
+    const menu = (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "wb-files", kind: "popup", width: 230, height: 44, props: { gutterMenu: true } }); };
+    const cell = (text) => h_flex().flex_1().min_w(0).h_full().items_center().whitespace_nowrap()
+      .children(!this.lang || text.length > 600 ? [div().child(text || " ")] : highlight(text, this.lang, t).map((p) => (p.color ? div().text_color(p.color).child(p.text) : div().child(p.text))));
+    const rows = Array.from({ length: Math.max(0, last - first) }, (_, k) => {
+      const i = first + k, l = lines[i], c = l.c;
+      return h_flex().h(AROW).flex_none().gap(10)
+        .child(div().id(`ba-${i}`).w(BLAME_W).h_full().flex_none().px(6).flex().items_center().overflow_hidden().whitespace_nowrap()
+          .bg(ageTint(c, t.accent)).text_size(11).text_color(t.muted).cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .tooltip(tooltip(c)).on_click(() => openCommit(where, c)).on_mouse_down("right", menu).child(label(c)))
+        .child(div().id(`ln-${i}`).w(36).flex_none().text_right().text_size(11).text_color(i === this.annLine ? t.foreground : t.dim)
+          .on_mouse_down("right", menu).child(String(i + 1)))
+        .child(cell(l.text));
+    });
+    return div().id("annotated").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
+      .on_size_change((s, cx) => { const h = s.height / z; if (h !== this.annH) { this.annH = h; cx.notify(); } })
+      .on_scroll_wheel((ev, cx) => {
+        if (Math.abs(ev.delta.y) < Math.abs(ev.delta.x)) return;
+        this.annY = Math.max(0, Math.min(max, off - ev.delta.y / z)); cx.stop_propagation(); cx.notify();
+      })
+      .when(!this.ann, (e) => e.child(div().p(12).text_color(this.annError ? t.ansi1 : t.dim).child(this.annError ?? "Running git blame…")))
+      .when(Boolean(this.ann), (e) => e.child(div().id("ann-x").size_full().overflow_x_scrollbar()
+        .child(div().min_w(BLAME_W + 56 + (this.annW ?? 400)).h_full().relative()
+          .child(v_flex().absolute().left(0).top(first * AROW - off).children(rows)))));
+  }
+
   // Closing the tab keeps the edits (saved, like the IDE); a refused save still shows its toast.
   async close() { if (this.viewer && this.dirty) await this.save(); }
 
@@ -385,6 +454,7 @@ export default class Files extends View {
   // it (unsaved edits are saved first, like the IDE switching files).
   viewerView(cx) {
     const r = shared(REQUEST), t = theme();
+    if (this.annotate && (shared("wb.blame.close") ?? 0) > this.annSince) { this.annotate = false; this.ann = null; }
     if (r && r.ts > (this.req.ts ?? 0) && (r.space == null || r.space === this.req.space) && !this.switching) {
       const go = () => { this.req = r; this.root = r.root; this.on = r.on; this.show(r.path, cx); };
       if (this.dirty) { this.switching = true; cx.spawn(async (cx) => { await this.save(); this.switching = false; go(); cx.notify(); }); }
@@ -405,11 +475,16 @@ export default class Files extends View {
           .border_1().border_color(this.dirty ? t.accent : t.border).text_color(this.dirty ? t.accent : t.dim)
           .when(this.dirty, (s) => s.cursor_pointer().hover((h) => h.bg(t.hover)))
           .tooltip("Save (⌘S / Ctrl+S)").on_click((_e, cx) => { if (this.dirty) saveNow(cx); })
-          .child(this.saving ? "Saving…" : this.dirty ? "Save" : "Saved"))))
-      .child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…"));
+          .child(this.saving ? "Saving…" : this.dirty ? "Save" : "Saved")))
+        .when(Boolean(this.code), (e) => e.child(div().id("blame").h(22).px(8).flex_none().flex().items_center().rounded(5).text_size(11).cursor_pointer()
+          .border_1().border_color(this.annotate ? t.accent : t.border).text_color(this.annotate ? t.accent : t.muted).when(this.annotate, (s) => s.bg(t.selected))
+          .hover((h) => h.bg(t.hover)).tooltip(this.annotate ? "Close annotations, back to the editor" : `Annotate with Git Blame: who changed each line and when${this.dirty ? " (of the saved file)" : ""}`)
+          .on_click((_e, cx) => this.toggleAnnotate(cx)).child("Blame"))))
+      .child(this.annotate ? this.annotatedView(t) : this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…"));
   }
 
   render(cx) {
+    if (props()?.gutterMenu) return this.gutterMenuView();
     if (props()?.menu) return this.menuView();
     if (this.viewer) return this.viewerView(cx);
     if (key() !== this.context?.key) this.refresh(cx);

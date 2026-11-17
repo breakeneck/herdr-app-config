@@ -7,7 +7,12 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { highlight, languageFor } from "./highlight.js";
-import { props, shared, spaces, panes, theme, settings, exec, readTextFile, run } from "herdr";
+import { props, shared, setShared, spaces, panes, theme, settings, exec, readTextFile, run, openOverlay, closeOverlay } from "herdr";
+import { blame, label, tooltip, tint as ageTint, openCommit, BLAME_W } from "./blame.js";
+
+// Annotate with Git Blame: right-click the line numbers. On for every diff tab until turned off the same way.
+const BLAME_ON = "wb.blame.diff";
+const blameOn = () => shared(BLAME_ON) === true;
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const ROW = 20, CHAR_W = 11 * 0.6;
@@ -47,6 +52,8 @@ function sideBySide(lines) {
 
 export default class DiffView extends View {
   init(_props, cx) {
+    if (props()?.gutterMenu) return; // the gutter's right-click menu: a popup copy that only draws
+    this.blame = { left: null, right: null }; this.blameKey = null;
     this.req = props()?.path ? props() : shared("wb.diff.request") ?? null;
     // "file" (default): the whole file, changes highlighted, prev/next scroll to them; "diff": hunks only.
     this.mode = (() => { try { return localStorage.getItem("mode") || "file"; } catch { return "file"; } })();
@@ -100,9 +107,41 @@ export default class DiffView extends View {
         this.loading = false;
         // Whole file: start at the first change, like a cursor placed on it.
         if (this.mode === "file" && hunks.length) this.goto(0);
+        if (blameOn()) this.loadBlame(req, cx);
       } catch (e) { this.error = String(e); this.loading = false; }
       cx.notify();
     });
+  }
+
+  // Blame of both sides: the old side at the revision compared against (or the commit's parent), the new side
+  // at the commit or in the working tree. A side git can't blame (a new or deleted file) just has no annotations.
+  loadBlame(req, cx) {
+    const k = req.ts ?? 0;
+    if (this.blameKey === k) return;
+    this.blameKey = k; this.blame = { left: null, right: null };
+    const { root, on, path, against, fresh, commit } = req;
+    const sides = { left: commit ? `${commit}^` : against ?? null, right: commit ?? (fresh ? null : "") };
+    for (const [side, rev] of Object.entries(sides)) {
+      if (rev === null) continue;
+      cx.spawn(async (cx) => {
+        try { const lines = await blame({ root, on, path, rev: rev || undefined }); if (this.blameKey === k) { this.blame[side] = lines; cx.notify(); } }
+        catch {}
+      });
+    }
+  }
+
+  gutterMenu(cx) {
+    cx.stop_propagation();
+    openOverlay({ mod: "wb-diff", kind: "popup", width: 230, height: 44, props: { gutterMenu: true } });
+  }
+
+  gutterMenuView() {
+    const t = theme(), on = blameOn();
+    return v_flex().p(6).w_full().bg(t.raised).text_color(t.foreground)
+      .child(h_flex().id("gm-blame").h(30).px(8).gap(8).items_center().rounded(6).cursor_pointer().text_size(12.5).hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click(() => { setShared(BLAME_ON, !on); closeOverlay(props()?.overlay); })
+        .child(div().w(14).text_color(t.accent).child(on ? "✓" : "")).child("Annotate with Git Blame"));
   }
 
   // Next / previous hunk, wrapping around; the current one is painted highlighted.
@@ -158,16 +197,25 @@ export default class DiffView extends View {
     const run = this.mode === "file" && this.cur >= 0 ? this.runs[this.cur] : null;
     const now = run && i >= run[0] && i < run[1];
     const tint = r.kind === "x" && c ? (name === "left" ? t.ansi1 : t.ansi2) + (now ? "30" : "18") : null;
+    const ann = blameOn() && c?.num !== undefined ? this.blame[name]?.[c.num - 1]?.c : null;
     return h_flex().w(width).h(ROW).flex_none().gap(10)
       .when(Boolean(tint), (e) => e.bg(tint))
       .when(Boolean(now), (e) => e.border_l(2).border_color(t.accent))
-      .child(div().w(30).flex_none().text_right().text_size(11).text_color(t.dim).child(c?.num === undefined ? "" : String(c.num)))
+      .when(blameOn(), (e) => e.child(div().id(`ba-${name}-${i}`).w(BLAME_W).h_full().flex_none().px(6).flex().items_center().overflow_hidden().whitespace_nowrap()
+        .when(Boolean(ann), (d) => d.bg(ageTint(ann, t.accent)).cursor_pointer().hover((s) => s.text_color(t.foreground)).tooltip(tooltip(ann))
+          .on_click(() => openCommit(this.req, ann)))
+        .text_size(11).text_color(t.muted).on_mouse_down("right", (_e, cx) => this.gutterMenu(cx)).child(ann ? label(ann) : "")))
+      .child(div().id(`gn-${name}-${i}`).w(30).flex_none().text_right().text_size(11).text_color(t.dim)
+        .on_mouse_down("right", (_e, cx) => this.gutterMenu(cx)).child(c?.num === undefined ? "" : String(c.num)))
       .child(this.cell(c ? c.text || " " : "", t));
   }
 
   render(cx) {
+    if (props()?.gutterMenu) return this.gutterMenuView();
     const t = theme();
     const req = shared("wb.diff.request");
+    if (blameOn() && this.req && !this.loading) this.loadBlame(this.req, cx);
+    const bw = blameOn() ? BLAME_W + 10 : 0;
     // Requests are per space: another space's Changes panel doesn't swap this tab's file.
     if (req && req.ts !== this.applied && (!req.space || req.space === this.space)) { this.applied = req.ts; this.req = req; this.load(req, cx); }
     const r = this.req;
@@ -218,9 +266,9 @@ export default class DiffView extends View {
           scroll(off - ev.delta.y / z); cx.stop_propagation(); cx.notify();
         })
         .when(this.rows.length > 0, (e) => e.child(h_flex().size_full()
-          .child(column("left", this.leftW))
+          .child(column("left", this.leftW + bw))
           .child(div().w(1).h_full().flex_none().bg(t.border))
-          .child(column("right", this.rightW))))
+          .child(column("right", this.rightW + bw))))
         .when(!this.rows.length, (e) => e.child(div().p(12).text_color(t.dim).child(this.error || (this.loading ? "Loading diff…" : r ? "No text changes" : "Open a changed file from the Changes panel"))))
         .when(thumb > 0, (e) => e.child(div().id("diff-thumb").absolute().right(2).top(thumbTop).w(6).h(thumb).rounded(3).bg(t.border).hover((s) => s.bg(t.input))
           .on_mouse_down("left", (ev, cx) => { this.thumbDrag = { y: ev.position.y, off }; cx.stop_propagation(); }))));
