@@ -3,7 +3,11 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { props, closeOverlay, theme, exec, setShared } from "herdr";
+import { props, closeOverlay, theme, exec, shared, setShared } from "herdr";
+
+// Dot folders show only when this is on (the eye button); off by default, kept in shared.json.
+const HIDDEN = "wb.folderPicker.showHidden";
+const showHidden = () => Boolean(shared(HIDDEN));
 
 export default class FolderPicker extends View {
   init(_props, cx) {
@@ -49,13 +53,17 @@ export default class FolderPicker extends View {
     return v_flex().size_full().p(12).gap(8).bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().items_center().gap(8)
         .child(div().flex_1().font_semibold().child(`Choose a folder${this.machine ? ` on ${this.machine}` : ""}`))
+        .child(div().id("fp-hidden").w(22).h(22).flex().items_center().justify_center().rounded(5).cursor_pointer()
+          .text_color(showHidden() ? t.accent : t.dim).hover((s) => s.bg(t.hover)).tooltip(showHidden() ? "Hide hidden folders" : "Show hidden folders")
+          .on_mouse_down("left", stop).on_click(() => setShared(HIDDEN, !showHidden()))
+          .child(svg(`mods/wb-folder-picker/icons/${showHidden() ? "eye" : "eye-off"}.svg`).size(13)))
         .child(div().id("fp-close").w(22).h(22).flex().items_center().justify_center().rounded(5).text_color(t.dim).hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => closeOverlay(props()?.overlay)).child(svg("mods/wb-folder-picker/icons/x.svg").size(12))))
       .child(Input.new(this.input).h(28).w_full().px(10).rounded(7).border_1().border_color(t.border).bg(t.chrome).text_size(12).text_color(t.foreground))
       .child(v_flex().h(330).flex_none().overflow_y_scroll().gap(1)
         .when(this.path !== "/", (e) => e.child(row("fp-up", "mods/wb-folder-picker/icons/chevron-left", "../", (_e, cx) => this.go(up, cx), true)))
         .when(Boolean(this.error), (e) => e.child(div().px(10).py(6).text_size(11.5).text_color(t.ansi1).child(this.error)))
         .when(this.loading, (e) => e.child(div().px(10).py(6).text_size(11.5).text_color(t.dim).child("Loading…")))
-        .children(this.dirs.map((d) => row(`fp-${d}`, "mods/wb-folder-picker/icons/folder.svg", d, (_e, cx) => this.go(this.path === "/" ? `/${d}` : `${this.path}/${d}`, cx)))))
+        .children(this.dirs.filter((d) => showHidden() || !d.startsWith(".")).map((d) => row(`fp-${d}`, "mods/wb-folder-picker/icons/folder.svg", d, (_e, cx) => this.go(this.path === "/" ? `/${d}` : `${this.path}/${d}`, cx)))))
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.path))
         .child(div().id("fp-cancel").h(30).px(14).flex().items_center().rounded(8).border_1().border_color(t.border).text_color(t.muted).text_size(12).cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => closeOverlay(props()?.overlay)).child("Cancel"))

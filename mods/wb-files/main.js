@@ -81,6 +81,9 @@ const REQUEST = "wb.files.request";
 const CLIP = "wb.files.clip", ACTION = "wb.files.action";
 // The folder last downloaded into (the menu offers it again); Downloads until one is picked.
 const DL_DIR = "wb.files.downloadDir";
+// Dotfiles show only when this is on (the header's eye button); off by default, kept in shared.json.
+const HIDDEN = "wb.files.showHidden";
+const showHidden = () => Boolean(shared(HIDDEN));
 const same = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i]);
 function openInMain(root, on, path) {
   const space = spaces().find((s) => s.active);
@@ -330,8 +333,10 @@ export default class Files extends View {
 
   rows(prefix, depth, out, t) {
     if (out.length >= TOTAL || depth > 40) return out;
+    const all = showHidden();
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
+      if (!all && entry.name.startsWith(".")) continue;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       const selected = this.sel.has(path), parent = prefix;
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer()
@@ -498,7 +503,13 @@ export default class Files extends View {
           .when(Boolean(fill), el => el.bg(fill).text_color("#ffffff")), sec, 44)
         .child(S.mark(sec))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(fill ? "#ffffffcc" : t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(fill ? "#ffffffcc" : t.dim).child(this.root?.split(/[\\/]/).pop() ?? ""))
+        .child(div().id("files-hidden").w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
+          .text_color(fill ? (showHidden() ? "#ffffff" : "#ffffffaa") : showHidden() ? t.accent : t.dim).hover((s) => s.bg(fill ? "#ffffff26" : t.hover))
+          .tooltip(showHidden() ? "Hide hidden files" : "Show hidden files")
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); setShared(HIDDEN, !showHidden()); })
+          .child(svg(`mods/wb-files/${showHidden() ? "eye" : "eye-off"}.svg`).size(14))))
       .child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
         .track_focus(this.handle)
         .on_key_down((e, cx) => {
