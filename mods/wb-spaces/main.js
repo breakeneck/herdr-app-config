@@ -78,6 +78,7 @@ export default class Spaces extends View {
     const sp = spaces();
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
+    this.synced(due);
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
   }
@@ -114,6 +115,22 @@ export default class Spaces extends View {
       }
     }
     return due;
+  }
+
+  // A git mod moved a repo's refs (an update, a fetch in the branch picker or the Changes panel):
+  // shared "wb.git.sync" = { rk: `${on}|${root}`, ts }. Its places are asked again at once,
+  // not at the fallback (a minute, and only for remote ones there is no watch).
+  synced(due) {
+    const sy = shared("wb.git.sync"), ts = sy?.ts ?? 0;
+    if (!ts || ts === this.syncTs) return;
+    const first = this.syncTs === undefined;
+    this.syncTs = ts;
+    if (first || typeof sy.rk !== "string") return;
+    const i = sy.rk.indexOf("|"), on = sy.rk.slice(0, i), root = sy.rk.slice(i + 1);
+    for (const k of Object.keys(this.git)) {
+      const [m, cwd] = JSON.parse(k);
+      if (String(m ?? null) === on && (cwd === root || cwd.startsWith(`${root}/`))) this.sameRepo(k, new Set(Object.keys(this.git))).forEach((x) => due.add(x));
+    }
   }
 
   // `key` and the other places in its repo (a commit there moves their ahead/behind).
