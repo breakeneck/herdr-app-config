@@ -29,6 +29,18 @@ const storeDraft = (id, text) => {
   setShared(DRAFTS, all);
 };
 
+// The base for "Branch changes", chosen per repo in the ⋯ menu: shared "wb.changes.baseFor" = { [repoId]: "origin/production" }.
+// Absent: picked automatically (the closest of the usual names). "wb.changes.base" = { [repoId]: the base in use } for the menu's label.
+const BASE_FOR = "wb.changes.baseFor", BASE_NOW = "wb.changes.base";
+const pinnedBase = (id) => (id && (shared(BASE_FOR) ?? {})[id]) || null;
+const setPinnedBase = (id, ref) => {
+  const all = { ...(shared(BASE_FOR) ?? {}) };
+  if (ref) all[id] = ref; else delete all[id];
+  setShared(BASE_FOR, all);
+};
+const baseNow = (id) => { const b = shared(BASE_NOW); return id && b && typeof b === "object" ? b[id] ?? null : null; };
+const BASE_NAMES = ["main", "master", "production", "prod", "develop", "dev", "staging"];
+
 const ITEM = 22, INDENT = 10; // ITEM: changed-file list row, INDENT: per tree level
 const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
 const LOG_MIN = 80, LOG_MAX = 700; // log body height, px
@@ -40,6 +52,7 @@ export default class Changes extends View {
   init(_props, cx) {
     // Popups (menus) are separate copies: they only draw, the panel copy does all the work.
     if (props()?.menu || props()?.commitMenu || props()?.viewMenu || props()?.authorMenu) return;
+    if (props()?.basePicker) { this.branches = null; this.loadBranches(props().basePicker, cx); return; }
     if (props()?.fileMenu) { this.confirming = false; this.reverting = false; return; }
     S.migrateKeys(["sections.collapsed"]);
     migrate();
@@ -123,7 +136,13 @@ export default class Changes extends View {
         const head = await git(["rev-parse", "--verify", "HEAD"]);
         let against = head.code === 0 ? "HEAD" : null, base = null;
         // Branch scope: everything since the branch left its base (like a PR), including uncommitted work.
-        if (scope === "base" && against) {
+        const pinned = pinnedBase(repoIdOf(on, root));
+        if (scope === "base" && against && pinned) {
+          // A base chosen in the ⋯ menu wins; one that no longer resolves falls back to the automatic pick.
+          const mb = await git(["merge-base", "HEAD", pinned]);
+          if (mb.code === 0) { base = pinned; against = mb.stdout.trim(); }
+        }
+        if (scope === "base" && against && !base) {
           // The base is the candidate the branch is closest to (fewest commits ahead), like a PR's target:
           // the repo's recent MR targets first, then the usual names, then the newest remote branches.
           let recent = [];
@@ -134,7 +153,7 @@ export default class Changes extends View {
           const [up, cur, newest] = await Promise.all([git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), git(["rev-parse", "--abbrev-ref", "HEAD"]),
             git(["for-each-ref", "--sort=-committerdate", "--count=10", "--format=%(refname:short)", "refs/remotes/origin"])]);
           const skip = new Set(["origin", "origin/HEAD", up.code === 0 ? up.stdout.trim() : "", `origin/${cur.stdout.trim()}`]);
-          const cands = [...new Set([...recent, "origin/HEAD", "origin/main", "origin/master", "origin/develop", "origin/dev", "main", "master", ...newest.stdout.split("\n").map((l) => l.trim())])]
+          const cands = [...new Set([...recent, "origin/HEAD", ...BASE_NAMES.map((b) => `origin/${b}`), ...BASE_NAMES, ...newest.stdout.split("\n").map((l) => l.trim())])]
             .filter((c) => c && (c === "origin/HEAD" || !skip.has(c)));
           const scored = await Promise.all(cands.map(async (ref) => {
             const [name, n, b] = await Promise.all([git(["rev-parse", "--abbrev-ref", ref]), git(["rev-list", "--count", `${ref}..HEAD`]), git(["rev-list", "--count", `HEAD..${ref}`])]);
@@ -177,7 +196,8 @@ export default class Changes extends View {
           files.push({ path, status: s, fresh, ...stat });
         }
         if (stale()) return;
-        if (base && shared("wb.changes.base") !== base) setShared("wb.changes.base", base);
+        { const id = repoIdOf(on, root); if (baseNow(id) !== base) setShared(BASE_NOW, { ...(typeof shared(BASE_NOW) === "object" ? shared(BASE_NOW) : {}), [id]: base }); }
+        this.pinSeen = pinned;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
         const id = repoIdOf(on, root);
         if (this.repoId !== id) {
@@ -412,7 +432,8 @@ export default class Changes extends View {
 
   // The ⋯ dropdown: every display pref, checkmarked (shared prefs; the panel copy reacts).
   viewMenuView() {
-    const t = theme(), p = getPrefs();
+    const t = theme(), p = getPrefs(), repo = typeof props().viewMenu === "object" ? props().viewMenu : null;
+    const pinned = pinnedBase(repo?.id), baseName = (pinned ?? baseNow(repo?.id))?.replace(/^origin\//, "") ?? null;
     const item = (id, label, on, pick) => h_flex().id(id).h(28).px(10).gap(8).items_center().rounded(6).cursor_pointer().text_size(12.5).hover((s) => s.bg(t.hover))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(() => { pick(); closeOverlay(props()?.overlay); })
@@ -420,7 +441,8 @@ export default class Changes extends View {
     const line = () => div().h(1).my(3).bg(t.border);
     return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
       .child(item("vm-head", "Uncommitted changes", p.scope === "head", () => setPrefs({ scope: "head" })))
-      .child(item("vm-base", (shared("wb.changes.base") ? `Branch changes vs ${shared("wb.changes.base").replace(/^origin\//, "")}` : "Branch changes vs base"), p.scope === "base", () => setPrefs({ scope: "base" })))
+      .child(item("vm-base", baseName ? `Branch changes vs ${baseName}` : "Branch changes vs base", p.scope === "base", () => setPrefs({ scope: "base" })))
+      .when(Boolean(repo), (e) => e.child(item("vm-pick", pinned ? "Compare with… (chosen)" : "Compare with… (auto)", false, () => openOverlay({ mod: "wb-changes", kind: "popup", width: 260, height: 360, props: { basePicker: repo } }))))
       .child(line())
       .child(item("vm-list", "List", p.view === "list", () => setPrefs({ view: "list" })))
       .child(item("vm-tree", "Tree", p.view === "tree", () => setPrefs({ view: "tree" })))
@@ -429,6 +451,32 @@ export default class Changes extends View {
       .child(item("vm-all", "Log: all branches", p.logAll, () => setPrefs({ logAll: true })))
       .child(line())
       .child(item("vm-log", "Show log", p.logOpen, () => setPrefs({ logOpen: !p.logOpen })));
+  }
+
+  // "Compare with…": the repo's branches (remote first), Auto on top; the choice is kept per repo and switches to branch changes.
+  loadBranches({ root, on }, cx) {
+    cx.spawn(async (cx) => {
+      const r = await exec("git", ["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/remotes", "refs/heads"], { cwd: root, on });
+      const all = r.code === 0 ? r.stdout.split("\n").map((l) => l.trim()).filter((b) => b && b !== "origin" && !b.endsWith("/HEAD")) : [];
+      const rank = (b) => { const i = BASE_NAMES.indexOf(b.replace(/^[^/]+\//, "")); return i < 0 ? 99 : i; };
+      const remote = all.filter((b) => b.startsWith("origin/")), local = all.filter((b) => !b.startsWith("origin/") && !all.includes(`origin/${b}`));
+      this.branches = [...remote, ...local].map((b, i) => ({ b, i })).sort((x, y) => rank(x.b) - rank(y.b) || x.i - y.i).map((x) => x.b).slice(0, 300);
+      cx.notify();
+    });
+  }
+
+  basePickerView() {
+    const t = theme(), repo = props().basePicker, cur = pinnedBase(repo.id);
+    const pick = (ref) => { setPinnedBase(repo.id, ref); setPrefs({ scope: "base" }); closeOverlay(props()?.overlay); };
+    const item = (id, label, on, ref, hint) => h_flex().id(id).h(26).px(8).gap(6).flex_none().items_center().rounded(5).cursor_pointer().text_size(12).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => pick(ref))
+      .child(div().w(12).text_color(t.accent).child(on ? "✓" : "")).child(div().flex_1().min_w(0).truncate().child(label))
+      .when(Boolean(hint), (e) => e.child(div().text_size(10.5).text_color(t.dim).child(hint)));
+    return v_flex().id("base-picker").p(6).gap(1).w_full().h_full().overflow_y_scroll().bg(t.raised).text_color(t.foreground)
+      .child(div().px(8).py(4).text_size(11).text_color(t.dim).child("Compare branch changes with"))
+      .child(item("bp-auto", "Auto", !cur, null, cur ? "" : (baseNow(repo.id) ?? "").replace(/^origin\//, "")))
+      .when(this.branches === null, (e) => e.child(div().px(8).py(4).text_size(12).text_color(t.dim).child("Loading branches…")))
+      .children((this.branches ?? []).map((b, i) => item(`bp-${i}`, b, cur === b, b)));
   }
 
   // The author filter's list: All, me, then the log's authors by commit count.
@@ -540,7 +588,9 @@ export default class Changes extends View {
     if (props()?.commitMenu) return this.commitMenuView();
     if (props()?.viewMenu) return this.viewMenuView();
     if (props()?.authorMenu) return this.authorMenuView();
+    if (props()?.basePicker) return this.basePickerView();
     if (key() !== this.context) this.refresh(cx);
+    if (this.repoId && this.scope === "base" && pinnedBase(this.repoId) !== (this.pinSeen ?? null)) { this.pinSeen = pinnedBase(this.repoId); this.refresh(cx); }
     // The file menu's actions: a rollback reloads the list; Show diff opens it like a click.
     const rev = shared("wb.changes.reverted") ?? 0, od = shared("wb.changes.openDiff");
     if (rev > (this.revSeen ?? BOOT)) { this.revSeen = rev; this.refresh(cx); }
@@ -609,7 +659,7 @@ export default class Changes extends View {
           (cx) => { if (this.log.cur) this.log.update(this.log.cur, cx); }, lr?.behind ? div().text_color(t.accent).child(`↓${lr.behind}`) : null))
         .child(div().id("view-menu").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 220, height: 250, props: { viewMenu: true } })).child("⋯")))
+          .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 240, height: this.root ? 280 : 250, props: { viewMenu: this.root ? { root: this.root, on: this.on ?? null, id: this.repoId } : true } })).child("⋯")))
       .when(total > 0, (e) => e.child(h_flex().h(26).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(this.checkbox("cb-all", allState, t, (cx) => this.setChecked(this.files.map((f) => f.path), allState !== 1, cx)))
         .child(div().text_size(11).text_color(t.dim).child(this.base && this.scope === "base" ? `Changes vs ${this.base}` : "Select all"))))
