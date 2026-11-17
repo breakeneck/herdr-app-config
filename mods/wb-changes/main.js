@@ -231,6 +231,8 @@ export default class Changes extends View {
   checkedFiles() { const u = this.unc(); return this.files.filter((f) => !u.has(f.path)); }
   // What Commit takes: the checked files with uncommitted changes (branch scope lists committed ones too).
   toCommit() { return this.checkedFiles().filter((f) => f.dirty !== false); }
+  // Branch changes vs a base: a read-only view (no checkboxes, no Generate or Commit).
+  branchView() { return this.scope === "base" && Boolean(this.base); }
   setChecked(paths, on, cx) {
     const u = this.unc();
     for (const p of paths) if (on) u.delete(p); else u.add(p);
@@ -295,7 +297,7 @@ export default class Changes extends View {
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleDir(r.path, cx))
       .on_mouse_down("right", (_e, cx) => this.fileMenu(under.map((f) => f.path), r.label, false, cx, r.path))
       .child(div().w(12).text_size(10).text_color(t.muted).child(r.open ? "▾" : "▸"))
-      .child(this.checkbox(`dcb-${r.path}`, state, t, (cx) => this.setChecked(under.map((f) => f.path), state !== 1, cx)))
+      .when(!this.branchView(), (e) => e.child(this.checkbox(`dcb-${r.path}`, state, t, (cx) => this.setChecked(under.map((f) => f.path), state !== 1, cx))))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.label))
       .child(div().text_size(10).text_color(t.dim).child(String(r.count)));
   }
@@ -327,7 +329,7 @@ export default class Changes extends View {
   // Ask the configured model for a commit message from the current diff, and drop it into the textarea.
   // Claude rides the person's subscription and starts inside the repo folder; local goes to the endpoint.
   generate(cx) {
-    if (!this.root || running(this.repoId) || this.busy || this.loading || this.context !== key()) return;
+    if (this.branchView() || !this.root || running(this.repoId) || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, id = this.repoId, hasHead = this.hasHead, against = this.against;
     // Only the checked files are described; all checked: the whole tree.
     const picked = this.checkedFiles(), only = picked.length < this.files.length ? ["--", ...picked.map((f) => f.path)] : [];
@@ -398,7 +400,7 @@ export default class Changes extends View {
   }
 
   commit(cx) {
-    if (!this.message.trim() || !this.toCommit().length || !this.root || this.busy || this.loading || this.context !== key()) return;
+    if (this.branchView() || !this.message.trim() || !this.toCommit().length || !this.root || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim(), id = this.repoId, push = commitAction() === "push";
     // Everything checked: stage all. Otherwise stage and commit just the checked paths (literal, not globs).
     const picked = this.toCommit().map((f) => f.path), partial = picked.length < this.files.filter((f) => f.dirty !== false).length;
@@ -607,10 +609,11 @@ export default class Changes extends View {
     const t = theme();
     const rows = this.listRows(), tree = this.view === "tree", unc = this.unc();
     const nChecked = this.files.filter((f) => !unc.has(f.path)).length, total = this.files.length, allState = nChecked === 0 ? 0 : nChecked === total ? 1 : 2;
-    const nCommit = this.toCommit().length, nothingNew = this.scope === "base" && total > 0 && !this.files.some((f) => f.dirty !== false);
-    const enabled = Boolean(this.message.trim() && nCommit && this.root && !this.busy && !this.loading);
+    const ro = this.branchView(), roTip = "Branch changes are shown: switch to Uncommitted changes (⋯) to commit";
+    const nCommit = this.toCommit().length;
+    const enabled = Boolean(!ro && this.message.trim() && nCommit && this.root && !this.busy && !this.loading);
     const generating = running(this.repoId);
-    const genEnabled = Boolean(this.root && !generating && !this.busy && !this.loading && this.context === key());
+    const genEnabled = Boolean(!ro && this.root && !generating && !this.busy && !this.loading && this.context === key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     const sec = S.sectionOf("wb-changes"), ov = S.overlay(sec);
     const nConflicts = (this.files ?? []).filter((f) => f.status === "U").length;
@@ -663,7 +666,7 @@ export default class Changes extends View {
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 240, height: this.root ? 280 : 250, props: { viewMenu: this.root ? { root: this.root, on: this.on ?? null, id: this.repoId } : true } })).child("⋯")))
       .when(total > 0, (e) => e.child(h_flex().h(26).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(this.checkbox("cb-all", allState, t, (cx) => this.setChecked(this.files.map((f) => f.path), allState !== 1, cx)))
+        .when(!ro, (e) => e.child(this.checkbox("cb-all", allState, t, (cx) => this.setChecked(this.files.map((f) => f.path), allState !== 1, cx))))
         .child(div().text_size(11).text_color(t.dim).child(this.base && this.scope === "base" ? `Changes vs ${this.base}` : "Select all"))))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
       .child(div().flex_1().min_h(44).relative()
@@ -673,7 +676,7 @@ export default class Changes extends View {
         const kind = f.status === "U" ? "X" : f.fresh ? "U" : f.status;
         return h_flex().id(`change-${f.path}`).h(ITEM).flex_none().px(8).pl(tree ? 8 + r.depth * INDENT + 18 : 8).gap(6).items_center().rounded(5).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
           .on_mouse_down("right", (_e, cx) => this.fileMenu([f.path], f.path.split("/").pop(), true, cx))
-          .child(this.checkbox(`cb-${f.path}`, unc.has(f.path) ? 0 : 1, t, (cx) => this.setChecked([f.path], unc.has(f.path), cx)))
+          .when(!ro, (e) => e.child(this.checkbox(`cb-${f.path}`, unc.has(f.path) ? 0 : 1, t, (cx) => this.setChecked([f.path], unc.has(f.path), cx))))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().text_color(nameColor(kind)).when(kind === "D", (s) => s.line_through()).child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? (this.base ? `No changes since ${this.base}` : "No uncommitted changes") : "No folder")))))
@@ -699,13 +702,13 @@ export default class Changes extends View {
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { this.prHint = null; cx.notify(); }).child("✕"))))
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
-            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the ${nChecked < total ? "checked files' " : ""}diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
+            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(ro ? roTip : `Write the commit message from the ${nChecked < total ? "checked files' " : ""}diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
               .child(generating ? svg("mods/wb-changes/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/wb-changes/icons/layers.svg").size(12))
               .child(generating ? "Generating…" : "Generate"))
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 300, height: 26 * Math.max(1, models().length) + 130, props: { menu: true, project: this.pk } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           .child(h_flex().id("commit").h(30).flex_none().rounded(8).overflow_hidden().bg(enabled ? t.solid : t.raised)
-            .child(h_flex().id("commit-run").px(14).h_full().items_center().text_size(12).text_color(enabled ? t.solid_foreground : t.dim).when(enabled, (e) => e.cursor_pointer()).when(nothingNew, (e) => e.tooltip(`Nothing uncommitted: these files are the branch's commits vs ${this.base}`)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.commit(cx))
+            .child(h_flex().id("commit-run").px(14).h_full().items_center().text_size(12).text_color(enabled ? t.solid_foreground : t.dim).when(enabled, (e) => e.cursor_pointer()).when(ro, (e) => e.tooltip(roTip)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.commit(cx))
               .tooltip((commitAction() === "push" ? "Commit the checked files with this message, then push to the same-named branch on origin" : "Commit the checked files with this message") + (nChecked ? "" : " · nothing checked"))
               .child(this.busy ? (this.phase ?? "Committing…") : commitAction() === "push" ? "Commit and Push" : "Commit"))
             .child(div().id("commit-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(enabled ? t.solid_foreground : t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Commit or Commit and Push").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 190, height: 74, props: { commitMenu: true } })).child(svg("mods/wb-changes/icons/chevron-down.svg").size(12))))))
