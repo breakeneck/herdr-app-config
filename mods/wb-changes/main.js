@@ -269,7 +269,7 @@ export default class Changes extends View {
     const n = under.filter((f) => !u.has(f.path)).length, state = n === 0 ? 0 : n === under.length ? 1 : 2;
     return h_flex().id(`dir-${r.path}`).h(ITEM).flex_none().pl(8 + r.depth * INDENT).pr(8).gap(6).items_center().rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleDir(r.path, cx))
-      .on_mouse_down("right", (_e, cx) => this.fileMenu(under.map((f) => f.path), r.label, false, cx))
+      .on_mouse_down("right", (_e, cx) => this.fileMenu(under.map((f) => f.path), r.label, false, cx, r.path))
       .child(div().w(12).text_size(10).text_color(t.muted).child(r.open ? "▾" : "▸"))
       .child(this.checkbox(`dcb-${r.path}`, state, t, (cx) => this.setChecked(under.map((f) => f.path), state !== 1, cx)))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.label))
@@ -446,10 +446,34 @@ export default class Changes extends View {
   }
 
   // Right-click on a changed file or folder: its menu, a popup copy of this mod (see fileMenuView).
-  fileMenu(paths, label, single, cx) {
+  fileMenu(paths, label, single, cx, dir = null) {
     cx.stop_propagation();
     if (!this.root || !paths.length) return;
-    openOverlay({ mod: "wb-changes", kind: "popup", width: 280, height: single ? 130 : 96, props: { fileMenu: { root: this.root, on: this.on ?? null, paths, label, single } } });
+    openOverlay({ mod: "wb-changes", kind: "popup", width: 280, height: single ? 162 : 128, props: { fileMenu: { root: this.root, on: this.on ?? null, paths, label, single, dir } } });
+  }
+
+  // Add to .gitignore: the file (or the folder, from a folder row) as a root-anchored entry in the repo's
+  // .gitignore, skipping lines already there. Tracked files are then untracked (kept on disk), or the
+  // ignore would do nothing; that removal is staged, like `git rm --cached`.
+  async ignore({ root, on, paths, dir }) {
+    const esc = (p) => p.replace(/([\\*?\[\]])/g, "\\$1").replace(/ $/, "\\ ");
+    const want = dir ? [`/${esc(dir)}/`] : paths.map((p) => `/${esc(p)}`);
+    let cur = "";
+    try { cur = await readTextFile(`${root}/.gitignore`, { on }); } catch { cur = ""; }
+    const have = new Set(cur.split(/\r?\n/).map((l) => l.trim()));
+    const add = want.filter((e) => !have.has(e));
+    if (add.length) {
+      const text = (cur && !cur.endsWith("\n") ? "\n" : "") + add.join("\n") + "\n";
+      const w = await exec("sh", ["-c", 'printf %s "$1" >> .gitignore', "sh", text], { cwd: root, on });
+      if (w.code !== 0) throw new Error((w.stderr || w.stdout || "could not write .gitignore").trim());
+    }
+    const tracked = await exec("git", ["--literal-pathspecs", "ls-files", "-z", "--", ...paths], { cwd: root, on });
+    const untrack = tracked.code === 0 ? tracked.stdout.split("\0").filter(Boolean) : [];
+    if (untrack.length) {
+      const r = await exec("git", ["--literal-pathspecs", "rm", "-r", "-q", "--cached", "-f", "--ignore-unmatch", "--", ...untrack], { cwd: root, on });
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+    }
+    return { added: add, untracked: untrack.length };
   }
 
   // Rollback, like the IDE's: tracked files go back to HEAD (index and working tree); files HEAD doesn't
@@ -498,6 +522,15 @@ export default class Changes extends View {
     return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
       .when(m.single, (e) => e.child(item("fm-diff", "Show diff", () => { setShared("wb.changes.openDiff", { path: m.paths[0], ts: Date.now() }); close(); })))
       .when(m.single, (e) => e.child(item("fm-copy", "Copy path", (cx) => { cx.write_to_clipboard(`${m.root}/${m.paths[0]}`); close(); })))
+      .child(item("fm-ignore", m.dir ? "Add folder to .gitignore" : n === 1 ? "Add to .gitignore" : `Add ${n} files to .gitignore`, (cx) => cx.spawn(async () => {
+        try {
+          const r = await this.ignore(m);
+          const body = (r.added.length ? r.added.join(", ") : "Already listed") + (r.untracked ? ` · ${r.untracked} tracked file${r.untracked === 1 ? "" : "s"} untracked (kept on disk)` : "");
+          notify({ title: "Added to .gitignore", body, level: "info", timeout: 3000 });
+        } catch (e) { notify({ title: "Couldn't add to .gitignore", body: String(e.message ?? e), level: "error" }); }
+        setShared("wb.changes.reverted", Date.now());
+        close();
+      })))
       .child(item("fm-rollback", n === 1 ? "Rollback…" : `Rollback ${n} files…`, (cx) => { this.confirming = true; cx.notify(); }, true));
   }
 
