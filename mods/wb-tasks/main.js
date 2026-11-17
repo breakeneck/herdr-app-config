@@ -3,6 +3,7 @@ import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-bas
 import { exec, theme, shared, setShared, props, openOverlay, closeOverlay, spaces, panes, focused } from "herdr";
 import * as S from "./section.js";
 import { Trello, trelloAccount } from "./trello.js";
+import { cache, loadCache, cacheReady } from "./cache.js";
 import { getSecret, findSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 import { Buffer } from "buffer";
 
@@ -161,10 +162,7 @@ function remoteKey(url) {
   return m ? `${m[1].toLowerCase()}|${m[2]}` : null;
 }
 const STALE = 30000; // a cached list shows at once; a switch refreshes it when older than this
-const store = {
-  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
-};
+const store = cache; // shared by every copy (popups start with empty localStorage), see cache.js
 
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
 
@@ -179,10 +177,7 @@ export default class Jira extends View {
     this.trello = new Trello(this);
     // `${on}|${cwd}` -> repo key, under "tasks:remotes" (wb-prs's "remotes" objects once landed in this
     // store under the plain name); the old key is read once, and entries that aren't a key are dropped.
-    const rem = store.get("tasks:remotes", null) ?? store.get("remotes", []);
-    this.remotes = new Map((Array.isArray(rem) ? rem : []).filter((e) => Array.isArray(e) && typeof e[1] === "string"));
-    // Opened from the Changes panel: it already knows this place's remote.
-    const pr = props(); if (pr?.lk && pr?.remote) this.remotes.set(pr.lk, `${pr.remote.host}|${pr.remote.path}`);
+    this.remotes = new Map();
     this.loc = null; this.repo = null; this.picking = false; this.trelloForm = false; this.choosing = false; this.jform = null;
     this.press = null; this.dragging = false; // a pressed issue row, and whether it's being dragged
     this.saving = false; this.formError = null; this.query = "";
@@ -194,7 +189,16 @@ export default class Jira extends View {
     this.token.set_masked(true);
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
-    cx.spawn(async (cx) => { await this.migrate(); this.loc = null; this.follow(cx); });
+    cx.spawn(async (cx) => {
+      // The cache first (follow waits for it), so a known list shows at once and refreshes behind.
+      await loadCache();
+      const rem = store.get("tasks:remotes", null) ?? store.get("remotes", []);
+      for (const e of Array.isArray(rem) ? rem : []) if (Array.isArray(e) && typeof e[1] === "string" && !this.remotes.has(e[0])) this.remotes.set(e[0], e[1]);
+      // Opened from the Changes panel: it already knows this place's remote.
+      const pr = props(); if (pr?.lk && pr?.remote) this.remotes.set(pr.lk, `${pr.remote.host}|${pr.remote.path}`);
+      this.trello.mine = store.get("trello:mine", this.trello.mine);
+      await this.migrate(); this.loc = null; this.follow(cx);
+    });
     cx.timer.every(2000, (cx) => this.follow(cx)); // a `cd` in a terminal; render catches space switches
     cx.timer.every(2 * 60 * 1000, (cx) => {
       const src = this.source();
@@ -217,7 +221,7 @@ export default class Jira extends View {
     this.activate(cx);
   }
 
-  // One Jira account's list state; its cached list (localStorage) shows at once.
+  // One Jira account's list state; its cached list (cache.js) shows at once.
   st(id) {
     const k = id ?? "-";
     if (!this.jst[k]) {
@@ -255,6 +259,7 @@ export default class Jira extends View {
 
   // The focused place moved: find its repo (cached), then show its source at once.
   follow(cx) {
+    if (!cacheReady()) return;
     const loc = location(), lk = `${loc.on}|${loc.cwd}`;
     if (lk === this.loc) return;
     this.loc = lk; this.choosing = false; this.picking = false;
