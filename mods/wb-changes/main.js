@@ -459,7 +459,7 @@ export default class Changes extends View {
     const esc = (p) => p.replace(/([\\*?\[\]])/g, "\\$1").replace(/ $/, "\\ ");
     const want = dir ? [`/${esc(dir)}/`] : paths.map((p) => `/${esc(p)}`);
     let cur = "";
-    try { cur = await readTextFile(`${root}/.gitignore`, { on }); } catch { cur = ""; }
+    try { cur = (await readTextFile(`${root}/.gitignore`, { on })) ?? ""; } catch { cur = ""; }
     const have = new Set(cur.split(/\r?\n/).map((l) => l.trim()));
     const add = want.filter((e) => !have.has(e));
     if (add.length) {
