@@ -604,7 +604,7 @@ export default class Changes extends View {
     this.view = pr.view;
     if (pr.scope !== this.scope) { this.scope = pr.scope; this.files = []; this.open = null; this.closed = false; this.note = null; this.refresh(cx); }
     this.log.sync(cx);
-    const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
+    const t = theme();
     const rows = this.listRows(), tree = this.view === "tree", unc = this.unc();
     const nChecked = this.files.filter((f) => !unc.has(f.path)).length, total = this.files.length, allState = nChecked === 0 ? 0 : nChecked === total ? 1 : 2;
     const nCommit = this.toCommit().length, nothingNew = this.scope === "base" && total > 0 && !this.files.some((f) => f.dirty !== false);
@@ -648,7 +648,7 @@ export default class Changes extends View {
       .child(S.header(h_flex().h(42).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border), sec, 44)
         .child(S.mark(sec))
         .child(div().font_semibold().child("Changes"))
-        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).flex_none().child(nChecked < total ? `${nChecked} of ${total} files` : `${total} files`))
+        .child(div().id("file-count").px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).flex_none().tooltip(nChecked < total ? `${nChecked} of ${total} files checked` : `${total} files`).child(String(total)))
         .when(installed("wb-tasks"), (e) => e.child(hbtn("open-tasks", "Tasks", "Tasks", svg("mods/wb-changes/icons/jira.svg").size(12), popup("wb-tasks", 440))))
         .when(installed("wb-prs"), (e) => e.child(hbtn("open-prs", "PR", "Pull requests", svg("mods/wb-changes/icons/pr.svg").size(12), popup("wb-prs", 460))))
         // Only while files are unmerged (a rebase/merge stopped, or an autostash that didn't apply): opens wb-conflicts.
@@ -659,7 +659,6 @@ export default class Changes extends View {
           .on_click((_e, cx) => { cx.stop_propagation(); openConflicts(this.root, this.on); })
           .child(`Resolve ${nConflicts}`)))
         .child(div().flex_1())
-        .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`))
         .child(hbtn("fetch", "", "Update: fetch, then bring the upstream's commits in (fast-forward or rebase; on conflicts a Resolve button shows here)", fetching ? svg("mods/wb-changes/icons/spinner.svg").size(12).spin(900) : svg("mods/wb-changes/icons/refresh.svg").size(12),
           (cx) => { if (this.log.cur) this.log.update(this.log.cur, cx); }, lr?.behind ? div().text_color(t.accent).child(`↓${lr.behind}`) : null))
         .child(div().id("view-menu").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")

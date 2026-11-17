@@ -331,8 +331,7 @@ export class Log {
             .when(Boolean(r.upstream), (e) => e.child(div().min_w(0).truncate().text_color(t.dim).child(`→ ${r.upstream}`)))
             .when(!r.upstream, (e) => e.child(div().flex_none().text_color(t.dim).child("no upstream")))))
         .when(Boolean(r && !r.error && rk), (e) => e
-          .when(Boolean(this.newer.has(rk)), (e) => e.child(tool("newer", "● New · Reload", "Commits or branches moved since this log was drawn", (_e, cx) => this.load(rk, cx), true)))
-          .child(tool("update", `Update${r.behind ? ` ↓${r.behind}` : ""}`, "Fetch, then bring the upstream's commits in: fast-forward, or rebase your commits on top (uncommitted changes are kept). A Resolve button shows in the header on conflicts.", (_e, cx) => this.update(rk, cx), r.behind > 0, this.busy === "Update")))
+          .when(Boolean(this.newer.has(rk)), (e) => e.child(tool("newer", "● New · Reload", "Commits or branches moved since this log was drawn", (_e, cx) => this.load(rk, cx), true))))
         .child(div().id("log-reload").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted)
           .hover((s) => s.bg(t.raised)).tooltip("Reload the log").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { cx.stop_propagation(); if (rk) this.load(rk, cx); })
           .child(svg("mods/wb-changes/icons/refresh.svg").size(12).when(Boolean(busyLoad), (s) => s.spin(900)))))
