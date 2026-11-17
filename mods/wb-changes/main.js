@@ -614,7 +614,7 @@ export default class Changes extends View {
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     const sec = S.sectionOf("wb-changes"), ov = S.overlay(sec);
     const nConflicts = (this.files ?? []).filter((f) => f.status === "U").length;
-    const lr = this.log.current(), fetching = this.log.busy === "Update";
+    const lr = this.log.current();
     // The hint goes away when the repo or branch it was for is no longer the one shown.
     if (this.prHint && (this.prHint.id !== this.repoId || (lr?.branch && lr.branch !== this.prHint.branch))) this.prHint = null;
     const hint = this.prHint;
@@ -659,8 +659,6 @@ export default class Changes extends View {
           .on_click((_e, cx) => { cx.stop_propagation(); openConflicts(this.root, this.on); })
           .child(`Resolve ${nConflicts}`)))
         .child(div().flex_1())
-        .child(hbtn("fetch", "", "Update: fetch, then bring the upstream's commits in (fast-forward or rebase; on conflicts a Resolve button shows here)", fetching ? svg("mods/wb-changes/icons/spinner.svg").size(12).spin(900) : svg("mods/wb-changes/icons/refresh.svg").size(12),
-          (cx) => { if (this.log.cur) this.log.update(this.log.cur, cx); }, lr?.behind ? div().text_color(t.accent).child(`↓${lr.behind}`) : null))
         .child(div().id("view-menu").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 240, height: this.root ? 280 : 250, props: { viewMenu: this.root ? { root: this.root, on: this.on ?? null, id: this.repoId } : true } })).child("⋯")))
