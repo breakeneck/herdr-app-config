@@ -8,7 +8,7 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
 import { exec, props, closeOverlay, shared, setShared } from "herdr";
-import { cache } from "./cache.js";
+import { fileCache } from "./cache.js";
 import { getSecret, findSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 
 const SERVICE = "herdr-trello";
@@ -55,7 +55,7 @@ async function call(creds, path, query = {}, method = "GET") {
   return r.json();
 }
 
-const ls = cache; // shared by every copy, see cache.js
+const ls = fileCache("wb-tasks"); // shared by every copy, see cache.js
 
 export class Trello {
   // `view` is the panel (main.js): drag state (press / dragging / over) and notify go through it.

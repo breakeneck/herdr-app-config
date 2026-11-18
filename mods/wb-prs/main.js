@@ -1,6 +1,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, appHome, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
+import { fileCache } from "./cache.js";
 import * as S from "./section.js";
 import { CreateDialog, GEN as MR_GEN, DRAFTS as MR_DRAFTS, liveJob, patchShared, generateMr } from "./create.js";
 import { migrate, models, modelFor, settingsFor, setUse, languageLine, runModel, describe } from "./ai.js";
@@ -111,6 +112,8 @@ function ghApprovals(pr, me) {
 }
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
 
+const store = fileCache("wb-prs"); // shared by every copy (a popup starts with empty localStorage), see cache.js
+
 export default class Prs extends View {
   init(_props, cx) {
     // Host: a zero-size block in the layout that only runs the queued background jobs (a popup's tasks die with it).
@@ -146,46 +149,53 @@ export default class Prs extends View {
     this.tokenInput.on("submit", (_e, cx) => this.saveToken(cx));
     this.tokenError = null; this.savingToken = false;
     // All open PRs/MRs of the repo, or only mine; remembered.
-    this.mine = (() => { try { return (localStorage.getItem("prs:mine") ?? localStorage.getItem("mine")) === "1"; } catch { return false; } })();
+    this.mine = false;
     this.fetching = new Set(); // repo keys being fetched one by one (a project switch)
-    // The last lists and folder→repo answers survive restarts: a switch shows them at once.
-    this.loadCache();
-    // Opened from the Changes panel: it already knows this place's remote (a popup starts with empty storage).
+    // Opened from the Changes panel: it already knows this place's remote.
     const pp = props(); if (pp?.lk && pp?.remote) this.remotes.set(pp.lk, { key: `${pp.remote.host}|${pp.remote.path}`, name: pp.remote.path, host: pp.remote.host, path: pp.remote.path });
-    this.key = null; this.focus(cx);
-    this.poll(cx);
+    // The last lists and folder→repo answers (cache.js, every copy's): a switch or a popup shows them at once,
+    // then refreshes the focused repo behind them when stale. The panel also polls every repo once; a popup doesn't.
+    cx.spawn(async (cx) => {
+      await store.load();
+      const m = store.get("prs:mine", null) ?? store.get("mine", 0); this.mine = m === 1 || m === "1" || m === true;
+      this.loadCache();
+      this.key = null; this.follow(cx);
+      if (!this.popup) this.poll(cx);
+      cx.notify();
+    });
     // The folder follows focus: render notices a switch at once; this catches a `cd` inside a terminal.
     cx.timer.every(2000, (cx) => this.follow(cx));
   }
 
-  // Cache: one list per mode (All / Mine) in localStorage, plus the folder → repo answers.
+  // Cache: one list per mode (All / Mine), plus the folder → repo answers (cache.js).
   // Keys carry a "prs:" prefix: another mod's store once got these written into it (and this one
   // theirs), so each key is ours alone and every entry is type-checked; unprefixed keys are read once.
   cacheKey() { return `prs:cache:${this.mine ? "mine" : "all"}`; }
   loadCache() {
     try {
       // Lists cached before PRs carried their repo can't drive the menu or popup: dropped (re-fetched).
-      const old = (k) => localStorage.getItem(k) ?? localStorage.getItem(k.slice(4)) ?? "[]";
-      this.byRepo = new Map(JSON.parse(old(this.cacheKey())).filter(([, e]) => e && typeof e === "object" && (e.prs ?? []).every((pr) => pr.repo)));
-      for (const [id, r] of JSON.parse(old("prs:remotes"))) if (r && typeof r === "object" && r.key) this.remotes.set(id, r);
+      const old = (k) => { const v = store.get(k, null) ?? store.get(k.slice(4), null) ?? []; return typeof v === "string" ? JSON.parse(v) : v; };
+      this.byRepo = new Map(old(this.cacheKey()).filter(([, e]) => e && typeof e === "object" && (e.prs ?? []).every((pr) => pr.repo)));
+      for (const [id, r] of old("prs:remotes")) if (r && typeof r === "object" && r.key && !this.remotes.has(id)) this.remotes.set(id, r);
     } catch { this.byRepo = new Map(); }
   }
   saveCache() {
     try {
       // Only real lists: errors and token prompts are asked again.
-      localStorage.setItem(this.cacheKey(), JSON.stringify([...this.byRepo].filter(([, e]) => !e.error && !e.needToken)));
-      localStorage.setItem("prs:remotes", JSON.stringify([...this.remotes]));
+      store.set(this.cacheKey(), [...this.byRepo].filter(([, e]) => !e.error && !e.needToken));
+      store.set("prs:remotes", [...this.remotes]);
     } catch {}
   }
 
   follow(cx) {
+    if (!store.ready()) return;
     const k = key();
     if (k !== this.key) { this.key = k; this.focus(cx); }
   }
 
   toggleMine(cx) {
     this.mine = !this.mine;
-    try { localStorage.setItem("prs:mine", this.mine ? "1" : "0"); } catch {}
+    store.set("prs:mine", this.mine ? 1 : 0);
     this.loadCache(); this.show(); cx.notify();
     this.poll(cx);
   }
@@ -628,7 +638,7 @@ export default class Prs extends View {
     // An approval made in a popup: re-fetch that repo here.
     const changed = shared("wb.prs.changed");
     if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (this.changedTs > (this.started ?? 0)) this.refreshOne(changed.repo, cx); }
-    const t = theme(), busy = this.loading || this.fetching.has(this.focusRepo);
+    const t = theme(), busy = this.loading || this.fetching.has(this.focusRepo) || !store.ready();
     const empty = this.error || (busy && !this.prs.length ? "Loading…" : !this.prs.length ? (this.mine ? "None of mine open · All shows everyone's" : "No open pull requests") : null);
     const refresh = div().id("refresh").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => { cx.stop_propagation(); this.poll(cx); })

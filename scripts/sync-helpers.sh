@@ -5,6 +5,7 @@
 #   secrets.js  canonical: mods/wb-tasks/secrets.js   (tokens: macOS Keychain)
 #   colors.js   canonical: mods/wb-spaces/colors.js   (project colors, shared "wb.colors")
 #   gitsync.js  canonical: mods/wb-changes/gitsync.js (update/fetch, conflicts, shared "wb.git.sync")
+#   cache.js    canonical: mods/wb-tasks/cache.js     (a cache kept across a mod's copies and restarts)
 # Targets are discovered: every other mods/*/ folder that already contains the helper.
 # Mods without the helper (Herdr's built-ins) are never touched.
 #
@@ -19,7 +20,7 @@ case "${1:-}" in
   "") ;;
   -w|--write) write=1 ;;
   -h|--help)
-    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
 esac
@@ -59,6 +60,7 @@ sync_file ai.js wb-ai commit-gen
 sync_file secrets.js wb-tasks
 sync_file colors.js wb-spaces
 sync_file gitsync.js wb-changes
+sync_file cache.js wb-tasks
 
 if [ "$differ" = 1 ]; then
   echo "Out of sync. Run: scripts/sync-helpers.sh --write" >&2

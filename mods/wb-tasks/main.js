@@ -3,7 +3,7 @@ import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-bas
 import { exec, theme, shared, setShared, props, openOverlay, closeOverlay, spaces, panes, focused } from "herdr";
 import * as S from "./section.js";
 import { Trello, trelloAccount } from "./trello.js";
-import { cache, loadCache, cacheReady } from "./cache.js";
+import { fileCache } from "./cache.js";
 import { getSecret, findSecret, setSecret, supported as secretsSupported, UNSUPPORTED } from "./secrets.js";
 import { Buffer } from "buffer";
 
@@ -162,7 +162,7 @@ function remoteKey(url) {
   return m ? `${m[1].toLowerCase()}|${m[2]}` : null;
 }
 const STALE = 30000; // a cached list shows at once; a switch refreshes it when older than this
-const store = cache; // shared by every copy (popups start with empty localStorage), see cache.js
+const store = fileCache("wb-tasks"); // shared by every copy (popups start with empty localStorage), see cache.js
 
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
 
@@ -191,7 +191,7 @@ export default class Jira extends View {
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     cx.spawn(async (cx) => {
       // The cache first (follow waits for it), so a known list shows at once and refreshes behind.
-      await loadCache();
+      await store.load();
       const rem = store.get("tasks:remotes", null) ?? store.get("remotes", []);
       for (const e of Array.isArray(rem) ? rem : []) if (Array.isArray(e) && typeof e[1] === "string" && !this.remotes.has(e[0])) this.remotes.set(e[0], e[1]);
       // Opened from the Changes panel: it already knows this place's remote.
@@ -259,7 +259,7 @@ export default class Jira extends View {
 
   // The focused place moved: find its repo (cached), then show its source at once.
   follow(cx) {
-    if (!cacheReady()) return;
+    if (!store.ready()) return;
     const loc = location(), lk = `${loc.on}|${loc.cwd}`;
     if (lk === this.loc) return;
     this.loc = lk; this.choosing = false; this.picking = false;
