@@ -2,7 +2,7 @@
 // Files move between this computer and the space's machine (transfer.js): drop files from Finder onto a folder
 // (or the list) to upload them there; ⌘C / ⌘V copy and paste, also to and from Finder; right-click → Download.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, shared, setShared, props, run, notify, openOverlay, closeOverlay, pickFolder, checking } from "herdr";
 import * as T from "./transfer.js";
 import * as S from "./section.js";
@@ -96,9 +96,15 @@ function openInMain(root, on, path) {
   else run("tab.new", { name, mod: "wb-files", props: req, space: space?.id ?? undefined });
 }
 
+// The New file / New folder popup (this mod with props.create), in `dir` (relative to root, "" = root).
+function openCreate(root, on, dir, kind) {
+  openOverlay({ mod: "wb-files", kind: "popup", width: 340, height: 150, props: { create: { root, on: on ?? null, dir, kind } } });
+}
+
 export default class Files extends View {
   init(_props, cx) {
     if (props()?.menu || props()?.gutterMenu) return;
+    if (props()?.create) { this.initCreate(cx); return; }
     if (props()?.view) { this.viewer = true; this.req = props(); this.root = this.req.root; this.on = this.req.on; this.show(this.req.path, cx); return; }
     S.migrateKeys(["sections.collapsed"]);
     this.saved = new Map();
@@ -294,7 +300,7 @@ export default class Files extends View {
     if (!this.sel.has(path)) this.sel = new Set([path]);
     this.handle.focus();
     const paths = [...this.sel];
-    openOverlay({ mod: "wb-files", kind: "popup", width: 260, height: 6 * 30 + 14 + 9,
+    openOverlay({ mod: "wb-files", kind: "popup", width: 260, height: 8 * 30 + 14 + 2 * 9,
       props: { menu: { root: this.root, on: this.on ?? null, paths, label: paths.length === 1 ? path.split("/").pop() : `${paths.length} items`, dir } } });
     cx.notify();
   }
@@ -309,7 +315,13 @@ export default class Files extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => action(cx))
       .child(div().flex_1().min_w(0).truncate().child(label)).when(Boolean(hint), (e) => e.child(div().text_size(11).text_color(t.dim).child(hint)));
     const last = shared(DL_DIR) || T.downloads(), lastName = last.split("/").filter(Boolean).pop() || last;
+    // New file / folder: inside a clicked folder, beside a clicked file.
+    const first = m.paths[0] ?? "", into = m.dir ? first : first.includes("/") ? first.slice(0, first.lastIndexOf("/")) : "";
+    const create = (kind) => { close(); openCreate(m.root, m.on, into, kind); };
     return v_flex().p(6).gap(1).w_full().bg(t.raised).text_color(t.foreground)
+      .child(item("fm-newfile", "New file…", null, () => create("file")))
+      .child(item("fm-newdir", "New folder…", null, () => create("folder")))
+      .child(div().h(1).mx(6).my(4).bg(t.border))
       .child(item("fm-dlto", "Download…", "choose folder", () => act("downloadTo")))
       .child(item("fm-dl", `Download to ${lastName}`, null, () => act("download")))
       .child(div().h(1).mx(6).my(4).bg(t.border))
@@ -317,6 +329,67 @@ export default class Files extends View {
       .child(item("fm-paste", m.dir ? "Paste into folder" : "Paste here", "⌘V", () => act("paste")))
       .child(item("fm-path", "Copy path", null, (cx) => { cx.write_to_clipboard(m.paths.map((p) => `${m.root}/${p}`).join("\n")); close(); }))
       .child(item("fm-reveal", m.on ? `On ${m.on}` : "Reveal in Finder", null, () => { if (!m.on) T.reveal(`${m.root}/${m.paths[0]}`); close(); }));
+  }
+
+  // The create popup: a name (a/b.txt makes the folders too), File or Folder, Enter creates.
+  initCreate(cx) {
+    const c = props().create;
+    this.kind = c.kind === "folder" ? "folder" : "file"; this.createError = null; this.creating = false;
+    this.nameInput = InputState.new({ placeholder: this.kind === "folder" ? "Folder name" : "File name" });
+    this.nameInput.on("submit", (_e, cx) => this.create(cx));
+    this.nameInput.on("change", (_e, cx) => { if (this.createError) { this.createError = null; cx.notify(); } });
+    this.nameInput.focus();
+    cx.timer.after(300, () => this.nameInput.focus());
+  }
+
+  create(cx) {
+    const c = props().create, name = this.nameInput.value().trim().replace(/\/+$/, "");
+    if (this.creating) return;
+    const fail = (m) => { this.createError = m; cx.notify(); };
+    if (!name) return fail("Enter a name");
+    if (name.startsWith("/") || name.split("/").some((p) => !p || p === "." || p === "..")) return fail("A name inside this folder (a/b.txt works)");
+    const rel = c.dir ? `${c.dir}/${name}` : name, kind = this.kind;
+    this.creating = true; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        // Never over an existing file or folder.
+        const script = kind === "folder"
+          ? 'if [ -e "$1" ]; then echo "Already exists" >&2; exit 1; fi; mkdir -p -- "$1"'
+          : 'if [ -e "$1" ]; then echo "Already exists" >&2; exit 1; fi; mkdir -p -- "$(dirname -- "$1")" && : > "$1"';
+        const r = await exec("sh", ["-c", script, "create", `${c.root}/${rel}`], { on: c.on });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "Couldn't create it");
+        setShared(ACTION, { action: "created", root: c.root, on: c.on, path: rel, kind, ts: Date.now() });
+        closeOverlay(props()?.overlay);
+      } catch (e) { this.creating = false; fail(String(e.message ?? e)); }
+    });
+  }
+
+  createView() {
+    const t = theme(), c = props().create, close = () => closeOverlay(props()?.overlay);
+    const seg = (id, label, kind) => div().id(id).px(10).h(24).flex().items_center().rounded(5).cursor_pointer().text_size(12)
+      .when(this.kind === kind, (e) => e.bg(t.selected).text_color(t.foreground)).when(this.kind !== kind, (e) => e.text_color(t.muted).hover((s) => s.bg(t.hover)))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { this.kind = kind; this.nameInput.focus(); cx.notify(); }).child(label);
+    return v_flex().id("create").size_full().p(12).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.5)
+      .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); close(); } })
+      .child(h_flex().gap(6).items_center()
+        .child(div().font_semibold().child("New"))
+        .child(h_flex().gap(2).p(2).rounded(7).border_1().border_color(t.border).child(seg("k-file", "File", "file")).child(seg("k-dir", "Folder", "folder")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(11).text_color(t.dim).child(`in ${c.dir || (c.root.split("/").pop() || "/")}/`)))
+      .child(Input.new(this.nameInput).w_full().h(30).px(8).rounded(6).border_1().border_color(this.createError ? t.ansi1 : t.input).bg(t.background))
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(this.createError ? t.ansi1 : t.dim).child(this.createError ?? "Enter creates · a/b.txt makes the folders"))
+        .child(div().id("create-go").px(12).h(26).flex().items_center().rounded(6).cursor_pointer().bg(t.solid).text_color(t.solid_foreground).text_size(12)
+          .hover((s) => s.opacity(0.88)).on_click((_e, cx) => this.create(cx)).child(this.creating ? "Creating…" : "Create")));
+  }
+
+  // Made in the create popup: open its folders, select it, a new file opens in the main area.
+  created(rel, kind, cx) {
+    const parts = rel.split("/");
+    for (let i = 1; i < parts.length; i++) this.folders.add(parts.slice(0, i).join("/"));
+    this.sel = new Set([rel]);
+    if (kind === "file") openInMain(this.root, this.on, rel);
+    this.refresh(cx); cx.notify();
   }
 
   // A menu choice from the popup, for the folder this list shows.
@@ -329,6 +402,7 @@ export default class Files extends View {
     else if (a.action === "paste") this.paste(this.pasteTarget(), cx);
     else if (a.action === "download") this.download(a.paths, shared(DL_DIR) || T.downloads(), cx);
     else if (a.action === "downloadTo") this.download(a.paths, null, cx);
+    else if (a.action === "created") this.created(a.path, a.kind, cx);
   }
 
   rows(prefix, depth, out, t) {
@@ -491,6 +565,7 @@ export default class Files extends View {
   render(cx) {
     if (props()?.gutterMenu) return this.gutterMenuView();
     if (props()?.menu) return this.menuView();
+    if (props()?.create) return this.createView();
     if (this.viewer) return this.viewerView(cx);
     if (key() !== this.context?.key) this.refresh(cx);
     this.takeAction(cx);
@@ -504,6 +579,12 @@ export default class Files extends View {
         .child(S.mark(sec))
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(fill ? "#ffffffcc" : t.dim).child(this.root?.split(/[\\/]/).pop() ?? ""))
+        .when(Boolean(this.root), (e) => e.child(div().id("files-new").w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
+          .text_size(16).text_color(fill ? "#ffffffcc" : t.dim).hover((s) => s.bg(fill ? "#ffffff26" : t.hover))
+          .tooltip("New file or folder (in the selected folder)")
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); openCreate(this.root, this.on, this.pasteTarget(), "file"); })
+          .child("+")))
         .child(div().id("files-hidden").w(22).h(22).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
           .text_color(fill ? (showHidden() ? "#ffffff" : "#ffffffaa") : showHidden() ? t.accent : t.dim).hover((s) => s.bg(fill ? "#ffffff26" : t.hover))
           .tooltip(showHidden() ? "Hide hidden files" : "Show hidden files")
