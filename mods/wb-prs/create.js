@@ -4,10 +4,10 @@ import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { exec, notify, props, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { models, modelFor, settingsFor, setUse, languageLine, NO_TRAILERS, runModel, describe } from "./ai.js";
+import { jiraKey, branchTitle, jiraSummary } from "./title.js";
 
 const LONG = { timeout: 600000 };
 const BASES = ["main", "master", "develop", "production"];
-const humanize = (b) => b.replace(/^[^/]+\//, "").replace(/[-_]+/g, " ").trim() || b;
 
 // Drafts and generations outlive the dialog (an overlay's tasks are cancelled when it closes, AGENTS.md "Cleanup"):
 //   shared "wb.mr.drafts" = { [`${repo.key}|${branch}`]: { title, description, target, draft, at, gen? } }
@@ -159,9 +159,18 @@ export class CreateDialog {
       this.source = src.name;
       this.commits = c.code === 0 ? c.stdout.split("\n").filter(Boolean) : [];
       this.ahead = this.commits.length;
-      const cur = this.title.value(), next = this.commits.length === 1 ? this.commits[0] : humanize(this.source);
-      if (!cur.trim() || cur === this.autoTitle) { this.title.set_value(next); this.autoTitle = next; }
+      // The title from the branch: its Jira key and the issue's summary when known (title.js).
+      const named = [this.source, this.branch].find((n) => jiraKey(n)) ?? this.source;
+      this.autoFill(branchTitle(named));
+      const key = jiraKey(named);
+      if (key && await jiraSummary(key) && this.target === b) { this.autoFill(branchTitle(named)); cx.notify(); }
     } catch (e) { this.error = `Could not compare with ${b}: ${e.message ?? e}`; cx.notify(); }
+  }
+
+  // Sets the title unless the person typed their own.
+  autoFill(next) {
+    const cur = this.title.value();
+    if (next && (!cur.trim() || cur === this.autoTitle)) { this.title.set_value(next); this.autoTitle = next; }
   }
 
   // Queues the job for the wb-prs panel copy and returns: the result is written into the draft even if this dialog is closed.
