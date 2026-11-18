@@ -33,8 +33,9 @@ const collapsedMap = () => shared("wb.sections.collapsed") ?? {};
 export const editing = () => Boolean(shared("wb.layout.edit"));
 
 // This mod's block in the shown layout: { id, parent } or null (not in this layout).
-export function sectionOf(mod) {
-  const r = find(layout(), (n) => n.type === "block" && n.content?.mod === mod);
+// `match(node)` tells copies of one mod apart (by their props) when the layout has several.
+export function sectionOf(mod, match) {
+  const r = find(layout(), (n) => n.type === "block" && n.content?.mod === mod && (!match || match(n)));
   return r ? { id: r.node.id, parent: r.parent } : null;
 }
 

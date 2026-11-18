@@ -48,6 +48,20 @@
               "min": 90
             },
             {
+              "id": "local-projects",
+              "type": "block",
+              "content": {
+                "mod": "wb-projects",
+                "props": {
+                  "local": true
+                }
+              },
+              "size": {
+                "weight": 1
+              },
+              "min": 90
+            },
+            {
               "id": "remote-projects",
               "type": "block",
               "content": {

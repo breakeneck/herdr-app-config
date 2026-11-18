@@ -32,7 +32,7 @@
                 "mod": "wb-spaces"
               },
               "size": {
-                "weight": 0.7329317927360535
+                "weight": 0.9455868601799011
               },
               "min": 90
             },
@@ -43,7 +43,7 @@
                 "mod": "wb-files"
               },
               "size": {
-                "weight": 1.2670682668685913
+                "weight": 1.0544131994247437
               },
               "min": 90
             },
@@ -57,6 +57,20 @@
                 "px": 42
               },
               "min": 42
+            },
+            {
+              "id": "local-projects",
+              "type": "block",
+              "content": {
+                "mod": "wb-projects",
+                "props": {
+                  "local": true
+                }
+              },
+              "size": {
+                "weight": 1
+              },
+              "min": 90
             },
             {
               "id": "remote-projects",
@@ -90,7 +104,7 @@
         }
       ],
       "size": {
-        "px": 273
+        "px": 282
       },
       "min": 44,
       "max": 480,
@@ -165,7 +179,7 @@
                 }
               ],
               "size": {
-                "px": 506
+                "px": 293
               },
               "min": 280,
               "max": 900

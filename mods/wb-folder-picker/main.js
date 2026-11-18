@@ -119,6 +119,6 @@ export default class FolderPicker extends View {
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.chosen()))
         .child(div().id("fp-cancel").h(30).px(14).flex().items_center().rounded(8).border_1().border_color(t.border).text_color(t.muted).text_size(12).cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => closeOverlay(props()?.overlay)).child("Cancel"))
-        .child(div().id("fp-choose").h(30).px(14).flex().items_center().rounded(8).bg(t.solid).text_color(t.solid_foreground).text_size(12).cursor_pointer().on_mouse_down("left", stop).on_click(() => { setShared("wb.folder.pick", { machine: this.machine, path: this.chosen(), ts: Date.now() }); closeOverlay(props()?.overlay); }).child("Choose this folder")));
+        .child(div().id("fp-choose").h(30).px(14).flex().items_center().rounded(8).bg(t.solid).text_color(t.solid_foreground).text_size(12).cursor_pointer().on_mouse_down("left", stop).on_click(() => { setShared("wb.folder.pick", { machine: this.machine, for: props()?.for ?? null, path: this.chosen(), ts: Date.now() }); closeOverlay(props()?.overlay); }).child("Choose this folder")));
   }
 }

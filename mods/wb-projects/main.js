@@ -2,10 +2,12 @@
 // Toolbox's Projects tab). Click opens the project as a space on that machine,
 // or goes to the space already open there (green dot). The list lives in
 // ~/.config/herdr-app/remote-projects.json: { "projects": [{ machine, name, path }] }.
+// Local projects: the same panel with props { local: true }: folders on this computer
+// (no machine chips, machine null), kept in local-projects.json.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, run, exec, hc, theme, appHome, readTextFile, writeTextFile, notify, shared, openOverlay } from "herdr";
+import { spaces, panes, run, exec, hc, home, props, theme, appHome, readTextFile, writeTextFile, notify, shared, openOverlay } from "herdr";
 import * as S from "./section.js";
 import { colorOf } from "./colors.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
@@ -19,7 +21,6 @@ function installed(name, fresh) {
 }
 
 
-const FILE = () => `${appHome()}/remote-projects.json`;
 const ICON = (n) => `mods/wb-projects/${n}.svg`;
 
 const base = (p) => p.replace(/\/+$/, "").split("/").pop();
@@ -31,40 +32,46 @@ const initials = (name) => {
 export default class RemoteProjects extends View {
   init(_props, cx) {
     S.migrateKeys(["sections.collapsed"]);
+    this.local = Boolean(props()?.local);
+    this.title = this.local ? "Local projects" : "Remote projects";
     this.projects = [];
     this.raw = null; // file text as last read, for writeTextFile's stale check
     this.machines = []; // [{ name, state }]
-    this.machine = localStorage.getItem("machine");
-    this.homes = {}; // machine -> its $HOME
+    this.machine = this.local ? null : localStorage.getItem("machine");
+    this.homes = {}; // machine -> its $HOME (local: key "")
+    if (this.local) this.homes[""] = home();
     this.over = null;
-    this.pickTs = 0;
+    this.pickTs = shared("wb.folder.pick")?.ts ?? 0; // an earlier pick isn't this copy's
     this.input = InputState.new({ placeholder: "~/dev/project  ↵ to add" });
     this.input.on("submit", (_e, cx) => this.add(cx));
     cx.spawn(async (cx) => { await this.load(); cx.notify(); });
+    if (this.local) return;
     this.refreshMachines(cx);
     cx.timer.every(20000, (cx) => this.refreshMachines(cx));
   }
 
+  file() { return `${appHome()}/${this.local ? "local" : "remote"}-projects.json`; }
+
   async load() {
     try {
-      this.raw = await readTextFile(FILE());
+      this.raw = await readTextFile(this.file());
       this.projects = this.raw ? JSON.parse(this.raw).projects ?? [] : [];
     } catch (e) {
-      notify({ title: "Remote projects", body: `Can't read remote-projects.json: ${e}`, level: "error" });
+      notify({ title: this.title, body: `Can't read ${this.file()}: ${e}`, level: "error" });
     }
   }
 
   async save() {
     const text = JSON.stringify({ projects: this.projects }, null, 2) + "\n";
     try {
-      await writeTextFile(FILE(), text, this.raw);
+      await writeTextFile(this.file(), text, this.raw);
       this.raw = text;
     } catch {
       // Changed on disk meanwhile: take the file's version and try once more.
       const keep = this.projects;
       await this.load();
       for (const p of keep) if (!this.projects.some((q) => q.machine === p.machine && q.path === p.path)) this.projects.push(p);
-      await writeTextFile(FILE(), JSON.stringify({ projects: this.projects }, null, 2) + "\n", this.raw);
+      await writeTextFile(this.file(), JSON.stringify({ projects: this.projects }, null, 2) + "\n", this.raw);
       await this.load();
     }
   }
@@ -89,7 +96,7 @@ export default class RemoteProjects extends View {
   }
 
   abs(machine, path) {
-    const home = this.homes[machine];
+    const home = this.homes[machine ?? ""];
     if (path === "~") return home ?? path;
     if (path.startsWith("~/") && home) return home + path.slice(1);
     if (!path.startsWith("/") && !path.startsWith("~") && home) return `${home}/${path}`;
@@ -113,14 +120,14 @@ export default class RemoteProjects extends View {
     if (s) return run("space.select", { id: s.id });
     const folder = this.abs(p.machine, p.path);
     if (folder.startsWith("~")) {
-      return notify({ title: "Remote projects", body: `${p.machine} isn't reachable yet`, level: "warning" });
+      return notify({ title: this.title, body: `${p.machine} isn't reachable yet`, level: "warning" });
     }
-    run("space.new", { name: p.name, folder, machine: p.machine });
+    run("space.new", { name: p.name, folder, machine: p.machine ?? "" });
   }
 
   add(cx) {
     const path = this.input.value().trim().replace(/\/+$/, "");
-    if (!path || !this.machine) return;
+    if (!path || !(this.machine || this.local)) return;
     this.addPath(path, cx);
     this.input.set_value("");
   }
@@ -149,8 +156,8 @@ export default class RemoteProjects extends View {
     return v_flex().pb(6).gap(4)
       // Same look as the Spaces title; click collapses (section.js).
       .child(S.header(h_flex().h(31).flex_none().pl(16).pr(10).gap(6).items_center().text_size(11.5).text_color(t.dim), sec, 31)
-        .child(S.mark(sec)).child("Remote projects"))
-      .child(h_flex().px(10).gap(4).flex_wrap().children(this.machines.map((m) => {
+        .child(S.mark(sec)).child(this.title))
+      .when(!this.local, (e) => e.child(h_flex().px(10).gap(4).flex_wrap().children(this.machines.map((m) => {
         const on = m.name === this.machine;
         return h_flex().id(`m-${m.name}`).items_center().gap(5).h(24).px(8).rounded(6).cursor_pointer()
           .bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted).text_size(12)
@@ -159,12 +166,12 @@ export default class RemoteProjects extends View {
           .child(svg(ICON("server")).size(12))
           .child(m.name)
           .child(div().size(6).rounded(3).bg(m.state === "connected" ? t.ansi2 : t.dim));
-      })));
+      }))));
   }
 
   row(p, t, ps) {
     const open = Boolean(this.spaceFor(p, ps));
-    const id = `${p.machine}:${p.path}`;
+    const id = `${p.machine ?? "local"}:${p.path}`;
     const over = this.over === id;
     return h_flex().id(`p-${id}`).items_center().gap(10).px(8).py(6).mx(6).rounded(8).cursor_pointer()
       .hover((s) => s.bg(t.hover))
@@ -191,20 +198,22 @@ export default class RemoteProjects extends View {
     const ps = panes();
     // A folder chosen in the picker dialog lands here through shared state.
     const pick = shared("wb.folder.pick");
-    if (pick && pick.ts !== this.pickTs) { this.pickTs = pick.ts; if (pick.machine === this.machine) this.addPath(pick.path, cx); }
-    const list = this.projects.filter((p) => p.machine === this.machine);
-    const sec = S.sectionOf("wb-projects"), ov = S.overlay(sec);
+    const mine = pick && (pick.for ?? null) === (this.local ? "local" : null) && (pick.machine ?? null) === this.machine;
+    if (pick && pick.ts !== this.pickTs) { this.pickTs = pick.ts; if (mine) this.addPath(pick.path, cx); }
+    const list = this.projects.filter((p) => (p.machine ?? null) === this.machine);
+    const sec = S.sectionOf("wb-projects", (n) => Boolean(n.content.props?.local) === this.local), ov = S.overlay(sec);
+    const can = this.local || Boolean(this.machine);
     return v_flex().id("root").size_full().relative().bg(t.chrome).text_color(t.foreground)
       .child(this.header(t, sec))
       .child(v_flex().id("list").flex_1().min_h(0).overflow_y_scrollbar().gap(2).pb(4)
-        .when(!this.machine, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
+        .when(!can, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
           .child("No ssh machines. Add one in Settings → Machines.")))
-        .when(this.machine && list.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
+        .when(can && list.length === 0, (el) => el.child(div().px(12).py(8).text_size(12).text_color(t.dim)
           .child("No projects yet: add a folder below.")))
         .children(list.map((p) => this.row(p, t, ps))))
-      .when(Boolean(this.machine), (el) => el.child(h_flex().px(10).py(8).gap(6).items_center()
+      .when(can, (el) => el.child(h_flex().px(10).py(8).gap(6).items_center()
         .when(installed("wb-folder-picker"), (b) => b.child(div().id("rp-browse").size(28).flex_none().flex().items_center().justify_center().rounded(7).border_1().border_color(t.input).bg(t.background).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Browse folders on this machine…").on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click(() => openOverlay({ mod: "wb-folder-picker", kind: "dialog", width: 520, height: 480, props: { machine: this.machine, start: this.homes[this.machine] ?? "~" } }))
+          .on_click(() => openOverlay({ mod: "wb-folder-picker", kind: "dialog", width: 520, height: 480, props: { machine: this.machine, for: this.local ? "local" : null, start: this.homes[this.machine ?? ""] ?? "~" } }))
           .child(svg("mods/wb-projects/icons/folder-plus.svg").size(14))))
         .child(Input.new(this.input).flex_1().h(28).px(8).rounded(7).border_1().border_color(t.input)
           .bg(t.background).text_size(12).text_color(t.foreground))))
