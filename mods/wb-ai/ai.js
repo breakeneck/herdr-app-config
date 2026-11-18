@@ -170,7 +170,31 @@ async function run(cmd, args, { cwd, on }) {
   return { ...r, stderr: String(r.stderr ?? "").split("\n").filter((l) => !/^\S+: (cannot set terminal process group|no job control in this shell)/.test(l)).join("\n") };
 }
 
-export async function runModel(m, prompt, { cwd, on } = {}) {
+// `language` (a LANGUAGES name) is enforced, not only asked for: the CLI's own `language` setting
+// (~/.claude/settings.json "language": "ukrainian" on that machine) would otherwise win over the prompt.
+// claude gets it as --settings (this run only), the instruction is repeated after the (long) input, and
+// an answer in the wrong script is asked for again once.
+export async function runModel(m, prompt, { cwd, on, language } = {}) {
+  if (!language) return runModelOnce(m, prompt, { cwd, on });
+  const tail = `\n\n---\nIMPORTANT: ${languageLine(language)} Every word of the answer must be in ${language}, whatever language the input, the code comments or your own settings use.`;
+  const extra = ["--settings", JSON.stringify({ language: language.toLowerCase() })];
+  let text = await runModelOnce(m, prompt + tail, { cwd, on, extra });
+  if (wrongScript(text, language)) {
+    text = await runModelOnce(m, `${prompt}${tail}\n\nYour previous answer was not in ${language}. Answer again, in ${language} only.`, { cwd, on, extra });
+  }
+  return text;
+}
+
+// Latin-script languages answered mostly in Cyrillic (prose only: code spans and paths don't count).
+const LATIN = new Set(["English", "Polish", "German", "Spanish", "French"]);
+function wrongScript(text, language) {
+  if (!LATIN.has(language)) return false;
+  const prose = String(text ?? "").replace(/`[^`]*`/g, " ");
+  const cyr = (prose.match(/[\u0400-\u04FF]/g) ?? []).length, lat = (prose.match(/[A-Za-z]/g) ?? []).length;
+  return cyr > lat;
+}
+
+async function runModelOnce(m, prompt, { cwd, on, extra = [] } = {}) {
   if (!m) throw new Error("No AI model: add one in AI models settings");
   if (m.provider === "local") {
     const base = String(m.url || "").replace(/\/+$/, "");
@@ -191,7 +215,7 @@ export async function runModel(m, prompt, { cwd, on } = {}) {
     if (r.code !== 0 && !text) throw new Error((r.stderr || r.stdout || "codex failed").trim().slice(-300));
     return clean(text ?? r.stdout);
   }
-  const r = await run(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), prompt], { cwd, on });
+  const r = await run(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), ...extra, prompt], { cwd, on });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout || "no output").trim().slice(0, 300));
   return clean(r.stdout);
 }

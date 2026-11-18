@@ -308,7 +308,7 @@ export default class Prs extends View {
           const diff = await this.diffText(g.pr);
           const prompt = `${cfg.template} ${languageLine(cfg.language)}\n\nTitle: ${d.title}\n\nDescription:\n${(d.body || "(none)").slice(0, 8000)}\n\nDiff (${d.from} → ${d.to}):\n${diff.slice(0, 90000)}${diff.length > 90000 ? "\n… (diff truncated)" : ""}`;
           // A CLI model runs inside the repo on its machine, so it can open more of the code than the diff.
-          const text = await runModel(model, prompt, { cwd: g.pr.repo.cwd, on: g.pr.repo.on });
+          const text = await runModel(model, prompt, { cwd: g.pr.repo.cwd, on: g.pr.repo.on, language: cfg.language });
           if (!text) throw new Error("the model returned nothing");
           patchShared(DRAFTS, url, { ...((shared(DRAFTS) ?? {})[url] ?? {}), text, model: model?.name, at: new Date().toISOString(), gen: g.id });
           patchShared(REVIEW_GEN, url, null);

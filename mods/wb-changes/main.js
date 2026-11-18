@@ -348,7 +348,7 @@ export default class Changes extends View {
         if (fresh.length) text += `\n\nNew untracked files (contents not shown): ${fresh.join(", ")}`;
         // The project's template (wb-ai settings) says how the message looks; blank lines are dropped unless allowed.
         const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template}${cfg.noBlank !== false ? " No blank lines anywhere." : ""} Reply with the message only — no quotes, no code fences, no explanations. ${NO_TRAILERS} ${languageLine(cfg.language)}`;
-        let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on });
+        let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on, language: cfg.language });
         if (cfg.noBlank !== false) msg = msg.split("\n").filter((l) => l.trim()).join("\n");
         if (!msg) throw new Error("the model returned nothing");
         // Always kept in that repo's draft; also in the box when that repo is the one shown now.

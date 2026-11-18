@@ -36,7 +36,7 @@ export async function generateMr(req) {
   if (diff.code !== 0) throw new Error((diff.stderr || diff.stdout).trim());
   const d = diff.stdout;
   const prompt = `${cfg.template} ${NO_TRAILERS} ${languageLine(cfg.language)}\n\nTitle: ${req.title}\n\nCommits:\n${log.stdout.slice(0, 8000)}\n\nDiff (${req.target} ← ${req.branch}):\n${d.slice(0, 90000)}${d.length > 90000 ? "\n… (diff truncated)" : ""}`;
-  const text = await runModel(model, prompt, { cwd: r.cwd, on: r.on });
+  const text = await runModel(model, prompt, { cwd: r.cwd, on: r.on, language: cfg.language });
   if (!text) throw new Error("the model returned nothing");
   return text;
 }
