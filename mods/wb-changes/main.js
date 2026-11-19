@@ -48,7 +48,7 @@ const LOG_MIN = 80, LOG_MAX = 700; // log body height, px
 const openGenSettings = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
 const openCommitSettings = (project) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "commit", project, projectName: projectName(project) } });
 
-// Shelve = git stash (with untracked files), like PhpStorm's Shelf. A stash commit never changes, so its file list is cached by hash.
+// Stash = git stash (with untracked files), like PhpStorm's Stash Changes / Unstash Changes. A stash commit never changes, so its file list is cached by hash.
 const stashCache = new Map();
 const gitAt = (root, on, args, timeout = 15000) => exec("git", [...READ, ...args], { cwd: root, on, timeout });
 const lines = (r) => (r.code === 0 ? r.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : null);
@@ -242,7 +242,7 @@ export default class Changes extends View {
         }
         this.watch(root, gitDir, cx);
         // The project (repo) key for per-project AI settings; cached in ai.js after the first lookup.
-        // The shelf summary rides the same reload (cached per stash, so only the list command runs again).
+        // The stash summary rides the same reload (cached per stash, so only the list command runs again).
         const shelf = await loadShelf(root, on).catch(() => []);
         if (stale()) return;
         this.shelf = shelfCounts(shelf);
@@ -470,21 +470,21 @@ export default class Changes extends View {
     try { localStorage.setItem(kind === "log" ? "logH" : "commitH", String(kind === "log" ? this.logH : this.commitH)); } catch {}
   }
 
-  // Shelve changes: stash everything (untracked too) with a message naming the branch and time. Runs in the menu popup, which closes after.
+  // Stash changes: stash everything (untracked too) with a message naming the branch and time. Runs in the menu popup, which closes after.
   async shelve({ root, on }, cx) {
     cx.spawn(async (cx) => {
       try {
         const b = (await gitAt(root, on, ["branch", "--show-current"])).stdout.trim() || "detached HEAD";
-        const r = await exec("git", ["stash", "push", "--include-untracked", "-m", `Shelved on ${b} ${stamp()}`], { cwd: root, on, timeout: 60000 });
+        const r = await exec("git", ["stash", "push", "--include-untracked", "-m", `On ${b} ${stamp()}`], { cwd: root, on, timeout: 60000 });
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-        notify({ title: "Changes shelved", body: /No local changes/.test(r.stdout) ? r.stdout.trim() : `Saved to the shelf from ${b}`, level: "success", timeout: 3000 });
-      } catch (e) { notify({ title: "Shelve failed", body: String(e.message ?? e), level: "error" }); }
+        notify({ title: "Changes stashed", body: /No local changes/.test(r.stdout) ? r.stdout.trim() : `Stashed from ${b}`, level: "success", timeout: 3000 });
+      } catch (e) { notify({ title: "Stash failed", body: String(e.message ?? e), level: "error" }); }
       setShared("wb.changes.reverted", Date.now());
       closeOverlay(props()?.overlay);
     });
   }
 
-  // The Shelf popup: stash entries with Unshelve (pop), Apply (keeps it) and Delete (asks twice). The popup copy runs git itself.
+  // The Unstash popup: stash entries with Pop, Apply (keeps it) and Drop (asks twice). The popup copy runs git itself.
   loadEntries(cx) {
     const { root, on } = props().shelf;
     cx.spawn(async (cx) => { this.entries = await loadShelf(root, on).catch(() => []); cx.notify(); });
@@ -499,7 +499,7 @@ export default class Changes extends View {
         const r = await exec("git", ["stash", kind, e.ref], { cwd: root, on, timeout: 60000 });
         if (r.code !== 0) {
           const out = (r.stderr || r.stdout).trim();
-          this.err = kind === "drop" ? out : `${out.slice(0, 500)}\n\nThe shelf entry is kept. Resolve conflicts from the Resolve button in the Changes header.`;
+          this.err = kind === "drop" ? out : `${out.slice(0, 500)}\n\nThe stash is kept. Resolve conflicts from the Resolve button in the Changes header.`;
         }
         this.entries = await loadShelf(root, on).catch(() => this.entries);
       } catch (x) { this.err = String(x.message ?? x); }
@@ -514,11 +514,11 @@ export default class Changes extends View {
     const btn = (id, label, act, color = t.foreground) => div().id(id).h(22).px(8).flex().items_center().rounded(5).border_1().border_color(t.border).text_size(11).text_color(color).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => act(cx)).child(label);
     return v_flex().p(6).gap(4).w_full().h_full().bg(t.raised).text_color(t.foreground)
-      .child(div().px(6).py(2).text_size(11).text_color(t.dim).child("Shelf"))
+      .child(div().px(6).py(2).text_size(11).text_color(t.dim).child("Stashes"))
       .when(Boolean(this.err), (e) => e.child(div().id("shelf-err").px(8).py(6).max_h(120).overflow_y_scroll().rounded(5).border_1().border_color(t.ansi1).text_size(11).text_color(t.ansi1).child(this.err)))
       .child(v_flex().id("shelf-list").flex_1().min_h(0).gap(4).overflow_y_scroll()
         .when(list === null, (e) => e.child(div().px(8).py(4).text_size(12).text_color(t.dim).child("Loading…")))
-        .when(list?.length === 0, (e) => e.child(div().px(8).py(4).text_size(12).text_color(t.dim).child("Nothing shelved")))
+        .when(list?.length === 0, (e) => e.child(div().px(8).py(4).text_size(12).text_color(t.dim).child("No stashes")))
         .children((list ?? []).map((en) => {
           const open = this.openRef === en.hash, n = en.files.length;
           return v_flex().id(`sh-${en.hash}`).flex_none().p(6).gap(4).rounded(6).border_1().border_color(t.border)
@@ -529,9 +529,9 @@ export default class Changes extends View {
               .child(div().text_size(10.5).text_color(t.dim).child(`${n} file${n === 1 ? "" : "s"} · ${ago(en.at)}`)))
             .when(open, (e) => e.child(v_flex().pl(16).max_h(110).overflow_y_scroll().id(`sh-files-${en.hash}`).children(en.files.slice(0, 200).map((f, i) => div().id(`sf-${i}`).truncate().text_size(11).text_color(t.muted).child(f)))))
             .child(h_flex().gap(6).justify_end()
-              .child(btn(`su-${en.hash}`, "Unshelve", (cx) => this.shelfAct("pop", en, cx), t.accent))
+              .child(btn(`su-${en.hash}`, "Pop", (cx) => this.shelfAct("pop", en, cx), t.accent))
               .child(btn(`sa-${en.hash}`, "Apply", (cx) => this.shelfAct("apply", en, cx)))
-              .child(btn(`sd-${en.hash}`, this.sure === en.hash ? "Delete?" : "Delete", (cx) => {
+              .child(btn(`sd-${en.hash}`, this.sure === en.hash ? "Drop?" : "Drop", (cx) => {
                 if (this.sure === en.hash) this.shelfAct("drop", en, cx); else { this.sure = en.hash; cx.notify(); }
               }, t.ansi1)));
         })));
@@ -554,8 +554,8 @@ export default class Changes extends View {
       .when(Boolean(repo), (e) => e.child(item("vm-pick", pinned ? "Compare with… (chosen)" : "Compare with… (auto)", false, () => openOverlay({ mod: "wb-changes", kind: "popup", width: 260, height: 360, props: { basePicker: repo } }))))
       .child(line())
       .when(Boolean(repo), (e) => e
-        .child(item("vm-shelve", "Shelve changes", false, (cx) => this.shelve(repo, cx), { off: !repo.dirty, keep: true }))
-        .child(item("vm-shelf", sh.n ? `Shelf (${sh.n} file${sh.n === 1 ? "" : "s"})` : "Shelf", false, () => openOverlay({ mod: "wb-changes", kind: "popup", width: 380, height: 420, props: { shelf: { root: repo.root, on: repo.on } } }), { color: sh.n ? t.accent : null }))
+        .child(item("vm-shelve", "Stash changes", false, (cx) => this.shelve(repo, cx), { off: !repo.dirty, keep: true }))
+        .child(item("vm-shelf", sh.n ? `Unstash changes (${sh.n} file${sh.n === 1 ? "" : "s"})` : "Unstash changes…", false, () => openOverlay({ mod: "wb-changes", kind: "popup", width: 380, height: 420, props: { shelf: { root: repo.root, on: repo.on } } }), { color: sh.n ? t.accent : null }))
         .child(line()))
       .child(item("vm-list", "List", p.view === "list", () => setPrefs({ view: "list" })))
       .child(item("vm-tree", "Tree", p.view === "tree", () => setPrefs({ view: "tree" })))
@@ -770,7 +770,7 @@ export default class Changes extends View {
           .on_click((_e, cx) => { cx.stop_propagation(); openConflicts(this.root, this.on); })
           .child(`Resolve ${nConflicts}`)))
         .child(div().flex_1())
-        .child(div().id("view-menu").size(22).flex_none().relative().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(shelfN ? `${shelfN} shelved file${shelfN === 1 ? "" : "s"} in ${shelf.k} shelve${shelf.k === 1 ? "" : "s"}` : noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")
+        .child(div().id("view-menu").size(22).flex_none().relative().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(shelfN ? `${shelfN} stashed file${shelfN === 1 ? "" : "s"} in ${shelf.k} stash${shelf.k === 1 ? "" : "es"}` : noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "View options")
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => openOverlay({ mod: "wb-changes", kind: "popup", width: 240, height: this.root ? 340 : 250, props: { viewMenu: this.root ? { root: this.root, on: this.on ?? null, id: this.repoId, shelf, dirty: this.files.some((f) => f.dirty !== false) } : true } })).child("⋯")
           .when(shelfN > 0, (e) => e.child(div().absolute().top(-3).right(-4).h(12).min_w(12).px(3).rounded(6).flex().items_center().justify_center().bg(t.accent).text_color(t.accent_foreground).text_size(8.5).font_semibold().child(shelfN > 99 ? "99+" : String(shelfN))))))
