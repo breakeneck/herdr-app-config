@@ -41,7 +41,7 @@ export const getAuthor = () => shared(AUTHOR) ?? null;
 export const setAuthor = (name) => setShared(AUTHOR, name);
 
 // File names are colored by status: M modified blue, A added and U untracked green (both new), D deleted gray (struck through), X conflict red.
-const NAME_COLORS = { M: ["#0032A0", "#6897BB"], A: ["#0A7700", "#629755"], U: ["#0A7700", "#629755"], D: ["#6C6C6C", "#6C6C6C"], X: ["#FF0000", "#D5756C"] };
+const NAME_COLORS = { M: ["#0032A0", "#6897BB"], A: ["#078A00", "#73C85A"], U: ["#078A00", "#73C85A"], D: ["#6C6C6C", "#6C6C6C"], X: ["#FF0000", "#D5756C"] };
 export const nameColor = (kind) => (NAME_COLORS[kind] ?? NAME_COLORS.M)[settings().dark ? 1 : 0];
 const logKind = (s) => ({ R: "M", C: "M", T: "M", U: "X" })[s] ?? s;
 
