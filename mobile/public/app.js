@@ -91,7 +91,7 @@ function tabsHtml(spaces) {
   let h = '';
   for (const s of spaces) {
     for (const t of s.tabs) {
-      h += `<div class="row" style="cursor:default">${dot(t.status)}<div class="main"><div class="name" style="font-size:13px">${esc(t.name || 'Tab ' + t.index)}</div></div><span class="tag ${t.status}">${t.status}</span></div>`;
+      h += `<div class="row" style="cursor:default">${dot(t.status)}<div class="main"><div class="name" style="font-size:13px">${esc(t.name || 'Tab ' + t.index)}</div></div><span class="tag ${t.status}">${t.status}</span><button class="xbtn" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" aria-label="Close tab">×</button></div>`;
       for (const x of t.terminals) h += `<div class="term-row" data-go="/t/${esc(x.address)}">${dot(x.status)}<div class="main"><div class="name" style="font-weight:500">${esc(x.app || x.program || x.address)} <span class="sub">${esc(x.address)}</span></div><div class="sub">${esc(x.msg || x.title)}</div></div></div>`;
     }
   }
@@ -126,8 +126,8 @@ async function loadBranches(msg) {
   el.innerHTML = `<div class="actions" style="padding:0 0 10px"><button data-act="pull">Pull</button><button data-act="fetch">Fetch</button></div>
     <div style="display:flex;gap:6px;margin-bottom:8px"><input type="text" id="nb" placeholder="New branch name" autocapitalize="off" autocomplete="off"><button data-act="nbranch">Create</button></div>
     <div id="gitout">${msg || ''}</div>
-    <div class="sec" style="padding-left:0">Local</div>${r.local.map((b) => row(b)).join('')}
-    ${r.remote.length ? `<div class="sec" style="padding-left:0">Remote</div>${r.remote.map((b) => row(b, 1)).join('')}` : ''}`;
+    <div class="sec" style="padding-left:0">Local</div><div class="blist">${r.local.map((b) => row(b)).join('')}</div>
+    ${r.remote.length ? `<div class="sec" style="padding-left:0">Remote</div><div class="blist">${r.remote.map((b) => row(b, 1)).join('')}</div>` : ''}`;
   bind(el);
 }
 async function gitAct(body, label) {
@@ -143,6 +143,16 @@ async function gitAct(body, label) {
 const acts = {
   reload() { location.reload(); },
   theme() { cycleTheme(); },
+  async closetab(el) {
+    const s = spaceById(el.dataset.s); const t = s && s.tabs.find((x) => x.id === el.dataset.t); if (!t) return;
+    const name = t.name || 'Tab ' + t.index, n = t.terminals.length;
+    const risky = t.terminals.filter((x) => x.status === 'working' || x.status === 'blocked');
+    const warn = risky.map((x) => `\nWarning: ${x.app || x.program} ${x.address} is ${x.status}.`).join('');
+    if (!confirm(`Close tab ${name}? Ends ${n} terminal(s).${warn}`)) return;
+    toast('Closing...', 10000);
+    const r = await api('/api/close-tab', { spaceId: s.id, tabId: t.id });
+    toast(r.ok ? 'Closed' : 'Close failed: ' + (r.error || 'error'), r.ok ? 1500 : 6000);
+  },
   async new(el) {
     toast('Creating...', 10000);
     const r = await api('/api/new', { project: +view.id, kind: el.dataset.kind });

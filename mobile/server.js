@@ -242,6 +242,21 @@ async function handleApi(req, res, url) {
     const r = await run(HC, args);
     return send(res, r.ok ? 200 : 500, r.ok ? { ok: true, out: r.stdout.trim(), newSpace: !space } : { error: (r.stderr || r.stdout).trim() });
   }
+  if (p === '/api/close-tab') {
+    // Addresses come from our own copy of the herdr-app doc, never from the client.
+    try { await fetchDoc(); } catch (e) { return send(res, 502, { error: 'core unavailable: ' + e.message }); }
+    const sp = ((doc && doc.spaces) || []).find((x) => x.id === body.spaceId);
+    const tb = sp && (sp.tabs || []).find((x) => x.id === body.tabId);
+    if (!tb) return send(res, 404, { error: 'tab not found' });
+    const addrs = walk(tb.root, []);
+    const results = [];
+    for (const a of addrs) {
+      try { await rpc('terminal.kill', { terminal: a }); results.push({ terminal: a, ok: true }); }
+      catch (e) { results.push({ terminal: a, ok: false, error: e.message }); }
+    }
+    const ok = results.every((r) => r.ok);
+    return send(res, ok ? 200 : 500, { ok, results, error: ok ? undefined : results.filter((r) => !r.ok).map((r) => r.terminal + ': ' + r.error).join('; ') });
+  }
   if (p === '/api/git') {
     const pr = projectByIdx(body.project); if (!pr) return send(res, 404, { error: 'no project' });
     const b = String(body.branch || '');

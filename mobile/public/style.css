@@ -53,3 +53,6 @@ pre.out{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1
 .sendbox textarea{height:44px;max-height:120px;resize:none}
 .conn{position:absolute;inset:50px 0 auto 0;text-align:center;padding:8px;background:var(--bad);color:var(--on-accent);display:none}
 .conn.on{display:block}
+
+.blist{max-height:360px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.xbtn{padding:2px 9px;font-size:18px;line-height:1.2;background:transparent;border-color:transparent;color:var(--dim)}
