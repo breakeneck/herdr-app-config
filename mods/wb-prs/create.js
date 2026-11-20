@@ -1,7 +1,7 @@
 // The "Create pull/merge request" dialog (PhpStorm-style): From (current branch) → Into (searchable
 // remote branches), title, description with AI Generate, Draft, Create. Opened by main.js with props { create: { repo } }.
 import { div, svg } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, InputState, Input, TextareaState, Textarea, Popup } from "gpui-base";
 import { exec, notify, props, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { models, modelFor, settingsFor, setUse, languageLine, NO_TRAILERS, runModel, describe } from "./ai.js";
 import { jiraKey, branchTitle, jiraSummary } from "./title.js";
@@ -54,9 +54,9 @@ export class CreateDialog {
     this.search = InputState.new({ placeholder: "Search branches…" });
     this.search.on("change", (_e, cx) => { this.filter = this.search.value(); cx.notify(); });
     this.search.on("submit", (_e, cx) => { const b = this.visible()[0]; if (b) this.pick(b, cx); });
-    this.filter = "";
+    this.filter = ""; this.intoOpen = false; this.intoClosedAt = 0; this.collapsed = new Set();
     this.title = InputState.new({ placeholder: "Title" });
-    this.body = TextareaState.new({ placeholder: "Description", rows: 10 });
+    this.body = TextareaState.new({ placeholder: "Description", rows: 7 });
     this.title.on("change", () => this.save());
     this.body.on("change", () => this.save());
     // A generation finishes in the panel copy: its text arrives through the shared draft.
@@ -136,7 +136,36 @@ export class CreateDialog {
     return [...rec, ...this.branches.filter((b) => !set.has(b) && hit(b))];
   }
 
-  pick(b, cx) { if (this.fatal) return; this.target = b; this.save(); cx.spawn(async (cx) => { await this.pickNow(b, cx); cx.notify(); }); }
+  // Into's dropdown rows, like the header's branch picker: Recent on top, then every `/` a folder.
+  intoRows() {
+    const f = (this.filter ?? "").trim().toLowerCase(), hit = (b) => !f || b.toLowerCase().includes(f);
+    const rec = f ? [] : this.recent(), set = new Set(rec), out = [];
+    if (rec.length) { out.push({ kind: "head", label: "Recent" }); for (const b of rec) out.push({ kind: "row", b, depth: 0, rest: b, recent: true }); }
+    const rest = this.branches.filter((b) => !set.has(b) && hit(b));
+    if (rest.length && rec.length) out.push({ kind: "head", label: "origin" });
+    const walk = (its, prefix, depth) => {
+      const folders = {}, leaves = [];
+      for (const it of its) if (it.parts.length - prefix.length > 1) (folders[it.parts[prefix.length]] ??= []).push(it); else leaves.push(it);
+      for (const seg of Object.keys(folders).sort()) {
+        const path = [...prefix, seg], key = path.join("/"), open = Boolean(f) || !this.collapsed.has(key);
+        out.push({ kind: "group", key, label: seg, depth, count: folders[seg].length, open });
+        if (open) walk(folders[seg], path, depth + 1);
+      }
+      for (const it of leaves.sort((a, b) => a.b.localeCompare(b.b))) out.push({ kind: "row", b: it.b, depth, rest: it.parts[it.parts.length - 1] });
+    };
+    walk(rest.map((b) => ({ b, parts: b.split("/") })), [], 0);
+    return out;
+  }
+
+  toggleInto(cx) {
+    if (this.fatal) return;
+    // The popover's outside-press handler already closed it on this same press: don't reopen.
+    if (this.intoOpen) this.intoOpen = false;
+    else if (Date.now() - this.intoClosedAt > 400) { this.intoOpen = true; this.search.focus?.(); }
+    this.intoClosedAt = 0; cx.notify();
+  }
+
+  pick(b, cx) { if (this.fatal) return; this.target = b; this.intoOpen = false; this.save(); cx.spawn(async (cx) => { await this.pickNow(b, cx); cx.notify(); }); }
 
   // The branch the MR comes from: the upstream's name when the local branch tracks a differently named, non-base
   // remote branch (review/1128 → origin/oleh/1128-…), else the local name.
@@ -154,10 +183,13 @@ export class CreateDialog {
     if (this.fatal) return;
     this.target = b; this.ahead = null; cx.notify();
     try {
-      const [c, src] = await Promise.all([this.git(["log", "--format=%s", `origin/${b}..HEAD`]), this.resolveSource(b)]);
+      const [c, src] = await Promise.all([this.git(["log", "--format=%h%x09%ct%x09%an%x09%s", `origin/${b}..HEAD`]), this.resolveSource(b)]);
       if (this.target !== b) return;
       this.source = src.name;
-      this.commits = c.code === 0 ? c.stdout.split("\n").filter(Boolean) : [];
+      this.commits = c.code === 0 ? c.stdout.split("\n").filter(Boolean).map((l) => {
+        const [hash, at, author, ...subj] = l.split("\t");
+        return { hash, at: Number(at) || 0, author, subject: subj.join("\t") };
+      }) : [];
       this.ahead = this.commits.length;
       // The title from the branch: its Jira key and the issue's summary when known (title.js).
       const named = [this.source, this.branch].find((n) => jiraKey(n)) ?? this.source;
@@ -238,7 +270,39 @@ export class CreateDialog {
       .hover((s) => s.opacity(0.9)).on_click(act).child(label);
     const label = (s) => div().text_size(10).font_semibold().text_color(t.dim).child(s);
     const field = (id, el, h = 28) => div().id(id).h(h).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).bg(t.background).cursor_text().child(el);
-    const all = this.visible(), list = all.slice(0, 200), more = all.length - list.length;
+    const ago = (s) => { const d = Date.now() / 1000 - s; return d < 3600 ? `${Math.max(1, Math.round(d / 60))}m` : d < 86400 ? `${Math.round(d / 3600)}h` : d < 86400 * 60 ? `${Math.round(d / 86400)}d` : `${Math.round(d / 86400 / 30)}mo`; };
+    const chip = (id, icon, text, extra) => h_flex().id(id).h(26).min_w(0).px(8).gap(6).items_center().rounded(7).border_1().border_color(t.border).bg(t.raised).text_size(12)
+      .child(svg(`mods/wb-prs/icons/${icon}.svg`).size(13).flex_none().text_color(t.muted))
+      .child(div().min_w(0).truncate().text_color(t.foreground).child(text)).when(Boolean(extra), (e) => e.child(extra));
+    const rows = this.intoOpen ? this.intoRows() : [], shown = rows.slice(0, 300);
+    const intoRow = (x) => {
+      if (x.kind === "head") return div().flex_none().h(22).px(8).flex().items_center().text_size(10).font_semibold().text_color(t.dim).child(x.label.toUpperCase());
+      if (x.kind === "group") return h_flex().id(`mr-g-${x.key}`).flex_none().h(24).pl(6 + x.depth * 16).pr(8).gap(6).items_center().rounded(5).cursor_pointer().text_size(12)
+        .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { if (this.collapsed.has(x.key)) this.collapsed.delete(x.key); else this.collapsed.add(x.key); cx.notify(); })
+        .child(div().w(12).text_size(10).text_color(t.dim).child(x.open ? "▾" : "▸"))
+        .child(svg("mods/wb-prs/icons/folder.svg").size(12).text_color(t.dim))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(x.label))
+        .child(div().text_size(10).text_color(t.dim).child(String(x.count)));
+      const sel = this.target === x.b;
+      return h_flex().id(`mr-t-${x.recent ? "r-" : ""}${x.b}`).flex_none().h(24).pl(6 + x.depth * 16 + (x.depth ? 0 : 0)).pr(8).gap(6).items_center().rounded(5).cursor_pointer().text_size(12)
+        .when(sel, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover)).tooltip(x.b)
+        .on_click((_e, cx) => this.pick(x.b, cx))
+        .child(svg(`mods/wb-prs/icons/${x.depth ? "branch" : "git-branch"}.svg`).size(12).flex_none().text_color(sel ? t.accent : t.dim))
+        .child(div().flex_1().min_w(0).truncate().text_color(sel ? t.foreground : t.muted).child(x.recent ? x.b : x.rest))
+        .when(x.b === this.def, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("default")));
+    };
+    const into = !this.intoOpen ? null : v_flex().id("mr-into-pop").mt(4).w(380).p(6).gap(6).rounded(8)
+      .border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .on_mouse_down_out((_e, cx) => { this.intoOpen = false; this.intoClosedAt = Date.now(); cx.notify(); })
+      .child(field("mr-search", Input.new(this.search).h_full().w_full().text_size(12).text_color(t.foreground), 26))
+      .child(div().relative().h(260)
+        .child(v_flex().id("mr-targets").absolute().inset_0().overflow_y_scroll().gap(1)
+          .when(!rows.some((x) => x.kind === "row"), (e) => e.child(div().p(6).text_size(12).text_color(t.dim).child(this.branches.length ? "No branch matches" : "No remote branches")))
+          .children(shown.map(intoRow))
+          .when(rows.length > shown.length, (e) => e.child(div().p(6).flex_none().text_size(11).text_color(t.dim).child(`… ${rows.length - shown.length} more, type to filter`))))
+        .child(Scrollbar.vertical("mr-targets").absolute().inset_0()))
+      .when(this.fetching, (e) => e.child(div().px(4).text_size(10).text_color(t.dim).child("fetching origin…")));
+    const n = this.ahead;
     const off = this.fatal, generating = this.isGenerating();
     const aiOn = this.deps.installed("wb-ai");
     const mdl = modelFor("mr", r.key);
@@ -260,29 +324,31 @@ export class CreateDialog {
         .child(div().text_size(11).text_color(t.dim).child(r.name ?? ""))
         .child(div().id("mr-close").size(26).ml(8).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => closeOverlay(props()?.overlay)).child("✕")))
-      .child(v_flex().id("mr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(14).gap(12)
-        .child(v_flex().gap(4).child(label("FROM"))
-          .child(h_flex().h(28).px(8).gap(8).items_center().rounded(6).border_1().border_color(t.border).bg(t.raised)
-            .child(div().flex_1().truncate().child(this.source && this.source !== this.branch ? `${this.branch} → origin/${this.source}` : (this.branch ?? "…")))
-            .when(this.ahead != null, (e) => e.child(div().text_size(11).text_color(t.dim).child(`${this.ahead} commit${this.ahead === 1 ? "" : "s"} ahead`)))))
+      .child(v_flex().id("mr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).gap(10)
+        .child(h_flex().gap(8).items_center()
+          .child(chip("mr-from", "git-branch", this.source && this.source !== this.branch ? `${this.branch} → origin/${this.source}` : (this.branch ?? "…")).flex_shrink_1().tooltip("From: the current branch"))
+          .child(div().flex_none().text_color(t.dim).child("→"))
+          .child(Popup.new("mr-into-popup", chip("mr-into", "git-branch", this.target ?? (this.fetching ? "…" : "choose a branch"), svg("mods/wb-prs/icons/chevron-down.svg").size(11).flex_none().text_color(t.muted))
+            .cursor_pointer().when(this.intoOpen, (s) => s.border_color(t.accent)).hover((s) => s.bg(t.hover)).tooltip("Into: the branch to merge into")
+            .when(!off, (s) => s.on_click((_e, cx) => this.toggleInto(cx)))).anchor("top_left").flex_shrink_1().min_w(0)
+            .when(Boolean(into), (el) => el.content(into)))
+          .child(div().flex_1())
+          .when(this.fetching, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("fetching origin…"))))
         .child(v_flex().gap(4)
-          .child(h_flex().gap(6).items_center().child(label("INTO")).when(this.fetching, (e) => e.child(div().text_size(10).text_color(t.dim).child("fetching origin…"))))
-          .child(field("mr-search", Input.new(this.search).h_full().w_full().text_size(12).text_color(t.foreground)))
-          .child(div().relative().h(132).rounded(6).border_1().border_color(t.border)
-            .child(v_flex().id("mr-targets").absolute().inset_0().overflow_y_scroll().p(3).gap(1)
-              .when(list.length === 0, (e) => e.child(div().p(6).text_size(12).text_color(t.dim).child(this.branches.length ? "No branch matches" : "No remote branches")))
-              .children(list.flatMap((b, i) => {
-                const rec = i < this.recentCount;
-                const row = h_flex().id(`mr-t-${b}`).h(24).px(8).gap(6).flex_none().items_center().rounded(4).cursor_pointer().text_size(12)
-                  .when(this.target === b, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
-                  .on_click((_e, cx) => this.pick(b, cx))
-                  .child(div().flex_1().truncate().child(b))
-                  .when(rec, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("recent")));
-                return rec && i === this.recentCount - 1 && list.length > this.recentCount ? [row, div().flex_none().h(1).mx(4).my(2).bg(t.border)] : [row];
-              }))
-              .when(more > 0, (e) => e.child(div().p(6).flex_none().text_size(11).text_color(t.dim).child(`… ${more} more, type to filter`))))
-            .child(Scrollbar.vertical("mr-targets").absolute().inset_0())))
-        .child(v_flex().gap(4).child(label("TITLE")).child(field("mr-title", Input.new(this.title).h_full().w_full().text_size(12).text_color(t.foreground))))
+          .child(h_flex().gap(6).items_center().child(label("COMMITS"))
+            .when(n != null, (e) => e.child(div().text_size(10).text_color(n ? t.dim : t.ansi3).child(n ? `${n} ahead of ${this.target}` : `nothing ahead of ${this.target}`))))
+          .child(div().relative().h(n ? Math.min(6, n) * 22 + 8 : 34).rounded(6).border_1().border_color(t.border)
+            .child(v_flex().id("mr-commits").absolute().inset_0().overflow_y_scroll().p(4)
+              .when(n == null, (e) => e.child(div().px(4).py(4).text_size(12).text_color(t.dim).child(off ? "—" : "…")))
+              .when(n === 0, (e) => e.child(div().px(4).py(4).text_size(12).text_color(t.ansi3).child(`No commits: this branch has nothing that ${this.target} doesn't have yet`)))
+              .children((n ? this.commits : []).map((c) => h_flex().id(`mr-c-${c.hash}`).flex_none().h(22).px(4).gap(8).items_center().rounded(4).text_size(12).hover((s) => s.bg(t.hover))
+                .tooltip(`${c.hash} · ${c.author}\n${c.subject}`)
+                .child(div().flex_none().w(58).text_size(11).text_color(t.accent).child(c.hash))
+                .child(div().flex_1().min_w(0).truncate().child(c.subject))
+                .child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(c.author))
+                .child(div().flex_none().w(30).text_size(11).text_color(t.dim).child(c.at ? ago(c.at) : "")))))
+            .child(Scrollbar.vertical("mr-commits").absolute().inset_0())))
+        .child(v_flex().gap(4).child(label("TITLE")).child(field("mr-title", Input.new(this.title).h_full().w_full().text_size(12).text_color(t.foreground), 26)))
         .child(v_flex().gap(4)
           .child(h_flex().gap(8).items_center().child(label("DESCRIPTION")).child(div().flex_1())
             .child(div().relative().flex_none().child(h_flex().id("mr-gen").h(26).rounded(6).border_1().border_color(t.accent).overflow_hidden().when(off, (s) => s.opacity(0.4))
@@ -301,8 +367,8 @@ export class CreateDialog {
                 }))
                 .child(svg("mods/wb-prs/icons/chevron-down.svg").size(11))))
               .when(Boolean(menu), (e) => e.child(menu))))
-          .child(div().id("mr-desc").h(220).px(10).py(8).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
-            .child(Textarea.new(this.body).w_full().h(204).text_size(12).text_color(t.foreground))))
+          .child(div().id("mr-desc").h(150).px(8).py(6).rounded(6).border_1().border_color(t.border).bg(t.background).cursor_text()
+            .child(Textarea.new(this.body).w_full().h(138).text_size(12).text_color(t.foreground))))
         .child(h_flex().id("mr-draft").h(24).gap(6).items_center().cursor_pointer().on_click((_e, cx) => { this.draft = !this.draft; this.save(); cx.notify(); })
           .child(div().size(14).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
             .border_color(this.draft ? t.accent : t.border).bg(this.draft ? t.accent : t.background).text_color(t.accent_foreground).child(this.draft ? "✓" : ""))
