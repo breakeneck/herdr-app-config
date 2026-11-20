@@ -343,7 +343,7 @@ export class CreateDialog {
               .when(n === 0, (e) => e.child(div().px(4).py(4).text_size(12).text_color(t.ansi3).child(`No commits: this branch has nothing that ${this.target} doesn't have yet`)))
               .children((n ? this.commits : []).map((c) => h_flex().id(`mr-c-${c.hash}`).flex_none().h(22).px(4).gap(8).items_center().rounded(4).text_size(12).hover((s) => s.bg(t.hover))
                 .tooltip(`${c.hash} · ${c.author}\n${c.subject}`)
-                .child(div().flex_none().w(58).text_size(11).text_color(t.accent).child(c.hash))
+                .child(div().flex_none().min_w(54).text_size(11).text_color(t.accent).child(c.hash.slice(0, 8))) // git's %h grows with the repo (10 here): 8 fits one line
                 .child(div().flex_1().min_w(0).truncate().child(c.subject))
                 .child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(c.author))
                 .child(div().flex_none().w(30).text_size(11).text_color(t.dim).child(c.at ? ago(c.at) : "")))))
