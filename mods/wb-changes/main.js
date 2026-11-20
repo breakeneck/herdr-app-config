@@ -546,13 +546,13 @@ export default class Changes extends View {
         .children((list ?? []).map((en) => {
           const open = this.openRef === en.id, n = en.files.length;
           return v_flex().id(`sv-${en.id}`).flex_none().p(6).gap(4).rounded(6).border_1().border_color(t.border)
-            .child(h_flex().id(`sv-head-${en.id}`).gap(6).items_center().cursor_pointer().on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .child(h_flex().id(`sv-head-${en.id}`).gap(6).items_start().cursor_pointer().on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click((_e, cx) => { this.openRef = open ? null : en.id; cx.notify(); })
-              .child(div().w(10).text_size(10).text_color(t.muted).child(open ? "▾" : "▸"))
-              .child(div().flex_1().min_w(0).truncate().text_size(12).child(en.name))
-              .child(div().text_size(10.5).text_color(t.dim).child(`${n} file${n === 1 ? "" : "s"} · ${ago(en.at)}`)))
+              .child(div().w(10).flex_none().mt(2).text_size(10).text_color(t.muted).child(open ? "▾" : "▸"))
+              .child(div().flex_1().min_w(0).whitespace_normal().text_size(12).child(en.name)))
             .when(open, (e) => e.child(v_flex().pl(16).max_h(110).overflow_y_scroll().id(`sv-files-${en.id}`).children(en.files.slice(0, 200).map((f, i) => div().id(`svf-${i}`).truncate().text_size(11).text_color(t.muted).child(f)))))
-            .child(h_flex().gap(6).justify_end()
+            .child(h_flex().gap(6).items_center()
+              .child(div().flex_1().min_w(0).pl(16).truncate().text_size(10.5).text_color(t.dim).child(`${n} file${n === 1 ? "" : "s"} · ${ago(en.at)}`))
               .child(btn(`svu-${en.id}`, this.working ? "Working…" : "Unshelve", (cx) => this.shelfAct("unshelve", en, cx), t.accent))
               .child(btn(`svd-${en.id}`, this.sure === en.id ? "Delete?" : "Delete", (cx) => {
                 if (this.sure === en.id) this.shelfAct("delete", en, cx); else { this.sure = en.id; cx.notify(); }
@@ -598,13 +598,13 @@ export default class Changes extends View {
         .children((list ?? []).map((en) => {
           const open = this.openRef === en.hash, n = en.files.length;
           return v_flex().id(`sh-${en.hash}`).flex_none().p(6).gap(4).rounded(6).border_1().border_color(t.border)
-            .child(h_flex().id(`sh-head-${en.hash}`).gap(6).items_center().cursor_pointer().on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .child(h_flex().id(`sh-head-${en.hash}`).gap(6).items_start().cursor_pointer().on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click((_e, cx) => { this.openRef = open ? null : en.hash; cx.notify(); })
-              .child(div().w(10).text_size(10).text_color(t.muted).child(open ? "▾" : "▸"))
-              .child(div().flex_1().min_w(0).truncate().text_size(12).child(en.msg))
-              .child(div().text_size(10.5).text_color(t.dim).child(`${n} file${n === 1 ? "" : "s"} · ${ago(en.at)}`)))
+              .child(div().w(10).flex_none().mt(2).text_size(10).text_color(t.muted).child(open ? "▾" : "▸"))
+              .child(div().flex_1().min_w(0).whitespace_normal().text_size(12).child(en.msg)))
             .when(open, (e) => e.child(v_flex().pl(16).max_h(110).overflow_y_scroll().id(`sh-files-${en.hash}`).children(en.files.slice(0, 200).map((f, i) => div().id(`sf-${i}`).truncate().text_size(11).text_color(t.muted).child(f)))))
-            .child(h_flex().gap(6).justify_end()
+            .child(h_flex().gap(6).items_center()
+              .child(div().flex_1().min_w(0).pl(16).truncate().text_size(10.5).text_color(t.dim).child(`${n} file${n === 1 ? "" : "s"} · ${ago(en.at)}`))
               .child(btn(`su-${en.hash}`, "Pop", (cx) => this.stashAct("pop", en, cx), t.accent))
               .child(btn(`sa-${en.hash}`, "Apply", (cx) => this.stashAct("apply", en, cx)))
               .child(btn(`sd-${en.hash}`, this.sure === en.hash ? "Drop?" : "Drop", (cx) => {
