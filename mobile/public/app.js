@@ -4,6 +4,26 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<
 let state = { projects: [], spaces: [], other: [] };
 let ws, view = null, term = null;
 
+// ---- theme ----
+const THEMES = ['auto', 'light', 'dark'];
+const XT_DARK = { background: '#000000', foreground: '#e4e7ee', cursor: '#4c8dff', selectionBackground: '#3a4a6b' };
+const XT_LIGHT = { background: '#fbf9f4', foreground: '#2b2e35', cursor: '#2f6fe0', cursorAccent: '#fbf9f4', selectionBackground: '#b9d0f7',
+  black: '#2b2e35', red: '#c93232', green: '#1d7a45', yellow: '#8a6100', blue: '#2159c4', magenta: '#9a3fa8', cyan: '#12768a', white: '#6b7280',
+  brightBlack: '#5d6370', brightRed: '#d9453d', brightGreen: '#2a8f55', brightYellow: '#9c7000', brightBlue: '#2f6fe0', brightMagenta: '#ad4fbb', brightCyan: '#1a8aa0', brightWhite: '#9aa0ab' };
+function themePref() { try { const t = localStorage.getItem('hm-theme'); return THEMES.includes(t) ? t : 'auto'; } catch { return 'auto'; } }
+const isLight = () => { const p = themePref(); return p === 'light' || (p === 'auto' && matchMedia('(prefers-color-scheme: light)').matches); };
+function applyTheme() {
+  const p = themePref(), r = document.documentElement;
+  if (p === 'auto') delete r.dataset.theme; else r.dataset.theme = p;
+  const m = document.querySelector('meta[name=theme-color]');
+  if (m) m.content = isLight() ? '#ffffff' : '#1c1f26';
+  if (term) term.options.theme = isLight() ? XT_LIGHT : XT_DARK;
+}
+function cycleTheme() { try { localStorage.setItem('hm-theme', THEMES[(THEMES.indexOf(themePref()) + 1) % 3]); } catch {} applyTheme(); render(); }
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
+const THEME_ICON = { auto: '◐ Auto', light: '☀ Light', dark: '☾ Dark' };
+applyTheme();
+
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 function toast(msg, ms = 4000) { const t = $('#toast'); t.textContent = msg; t.className = 'on'; clearTimeout(toast.t); toast.t = setTimeout(() => (t.className = ''), ms); }
@@ -53,10 +73,11 @@ function bind(root) {
 }
 
 function home() {
-  let h = `<header class="bar"><h1>Herdr</h1><button class="icon" data-act="reload">⟳</button></header>`;
+  let h = `<header class="bar"><h1>Herdr</h1><button data-act="theme">${THEME_ICON[themePref()]}</button><button class="icon" data-act="reload">⟳</button></header>`;
   if (!state.projects.length && !state.spaces.length) h += `<div class="empty">Connecting...</div>`;
   h += `<div class="sec">Projects</div>`;
-  for (const p of state.projects) {
+  const rank = (p) => (!p.open ? 3 : p.status === 'blocked' ? 0 : p.status === 'done' ? 1 : 2);
+  for (const p of [...state.projects].sort((x, y) => rank(x) - rank(y))) {
     h += `<div class="row" data-go="/p/${p.idx}">${dot(p.status, p.open)}<div class="main"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.path.replace(/^\/home\/[^/]+/, '~'))}</div><div class="meta">${gitLine(p.git)}</div></div>${p.status ? `<span class="tag ${p.status}">${p.status}</span>` : ''}</div>`;
   }
   if (state.other.length) {
@@ -121,6 +142,7 @@ async function gitAct(body, label) {
 }
 const acts = {
   reload() { location.reload(); },
+  theme() { cycleTheme(); },
   async new(el) {
     toast('Creating...', 10000);
     const r = await api('/api/new', { project: +view.id, kind: el.dataset.kind });
@@ -155,7 +177,7 @@ function openTerm(addr) {
   <div class="keys"><button data-k="\x1b">Esc</button><button data-k="\t">Tab</button><button id="kctrl">Ctrl</button><button data-k="\x1b[A">↑</button><button data-k="\x1b[B">↓</button><button data-k="\x1b[D">←</button><button data-k="\x1b[C">→</button><button data-k="\x03">^C</button><button data-k="\r">Enter</button></div>
   <div class="sendbox"><textarea id="sendtxt" rows="1" placeholder="Reply (pasted + Enter)"></textarea><button class="primary" id="sendbtn">Send</button></div></div>`;
   $('#back').onclick = () => (location.hash = backHash);
-  term = new Terminal({ fontSize: 12.5, fontFamily: 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace', theme: { background: '#000000', foreground: '#e4e7ee', cursor: '#4c8dff' }, scrollback: 3000, cursorBlink: false, allowProposedApi: true });
+  term = new Terminal({ fontSize: 12.5, fontFamily: 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace', theme: isLight() ? XT_LIGHT : XT_DARK, scrollback: 3000, cursorBlink: false, allowProposedApi: true });
   fit = new FitAddon.FitAddon(); term.loadAddon(fit);
   term.open($('#xt'));
   const doFit = () => { try { fit.fit(); } catch {} };
