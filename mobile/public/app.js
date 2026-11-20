@@ -78,7 +78,7 @@ function home() {
   h += `<div class="sec">Projects</div>`;
   const rank = (p) => (!p.open ? 3 : p.status === 'blocked' ? 0 : p.status === 'done' ? 1 : 2);
   for (const p of [...state.projects].sort((x, y) => rank(x) - rank(y))) {
-    h += `<div class="row" data-go="/p/${p.idx}">${dot(p.status, p.open)}<div class="main"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.path.replace(/^\/home\/[^/]+/, '~'))}</div><div class="meta">${gitLine(p.git)}</div></div>${p.status ? `<span class="tag ${p.status}">${p.status}</span>` : ''}</div>`;
+    h += `<div class="row" data-go="/p/${p.idx}">${dot(p.status, p.open)}<div class="main"><div class="name">${esc(p.name)}</div><div class="meta">${gitLine(p.git)}<span class="path">${esc(p.path.replace(/^\/home\/[^/]+/, '~'))}</span></div></div>${p.status ? `<span class="tag ${p.status}">${p.status}</span>` : ''}</div>`;
   }
   if (state.other.length) {
     h += `<div class="sec">Other spaces</div>`;
@@ -91,7 +91,7 @@ function tabsHtml(spaces) {
   let h = '';
   for (const s of spaces) {
     for (const t of s.tabs) {
-      h += `<div class="row" style="cursor:default">${dot(t.status)}<div class="main"><div class="name">${esc(t.name || 'Tab ' + t.index)}</div></div><span class="tag ${t.status}">${t.status}</span></div>`;
+      h += `<div class="row" style="cursor:default">${dot(t.status)}<div class="main"><div class="name" style="font-size:13px">${esc(t.name || 'Tab ' + t.index)}</div></div><span class="tag ${t.status}">${t.status}</span></div>`;
       for (const x of t.terminals) h += `<div class="term-row" data-go="/t/${esc(x.address)}">${dot(x.status)}<div class="main"><div class="name" style="font-weight:500">${esc(x.app || x.program || x.address)} <span class="sub">${esc(x.address)}</span></div><div class="sub">${esc(x.msg || x.title)}</div></div></div>`;
     }
   }
