@@ -104,14 +104,18 @@ export default class RemoteProjects extends View {
   }
 
   // The open space for a project: its folder, or a terminal in it, is in that folder.
+  // A folder belongs to the deepest listed project containing it, so a project at
+  // ~ (or any parent) doesn't claim spaces opened in its sub-projects.
   spaceFor(p, ps) {
-    const dir = this.abs(p.machine, p.path);
-    const inside = (f) => f && (f === dir || f.startsWith(dir + "/"));
-    return spaces().find((s) => {
-      if ((s.machine ?? null) !== p.machine) return false;
-      if (inside(s.folder)) return true;
+    const machine = p.machine ?? null;
+    const dir = this.abs(machine, p.path);
+    const inside = (f, d) => f && (f === d || f.startsWith(d + "/"));
+    const dirs = this.projects.filter((q) => (q.machine ?? null) === machine).map((q) => this.abs(machine, q.path));
+    const mine = (f) => inside(f, dir) && !dirs.some((d) => d.length > dir.length && inside(f, d));
+    const here = spaces().filter((s) => (s.machine ?? null) === machine);
+    return here.find((s) => mine(s.folder)) ?? here.find((s) => {
       const tabs = new Set(s.tabs.map((t) => t.id));
-      return ps.some((x) => tabs.has(x.tab) && inside(x.cwd));
+      return ps.some((x) => tabs.has(x.tab) && mine(x.cwd));
     });
   }
 
