@@ -43,6 +43,7 @@ desk = {
     "ai": {"models": g("ai.models", []), "use": g("ai.use", {}), "project": g("ai.project", {})},
     "tasks": {"accounts": accounts, "sources": g("tasks.sources", {})},
     "mr": {"recent": g("mr.recent", {})},
+    "colors": g("colors", {}),
 }
 
 secrets = {"jira": {}, "trello": {}, "gitlab": {}}

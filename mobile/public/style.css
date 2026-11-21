@@ -167,3 +167,83 @@ details.subfold>summary::-webkit-details-marker{display:none}
 details.subfold .mark{flex:none;width:10px;font-size:9px}
 details.subfold .mark::before{content:"▸"}
 details.subfold[open] .mark::before{content:"▾"}
+/* ===== wide (desktop browser) layout, like the Herdr app window ===== */
+body.wide{overflow:hidden}
+body.wide #app{height:100vh;min-height:0}
+.wshell{display:grid;grid-template-columns:268px minmax(0,1fr) 400px;grid-template-rows:minmax(0,1fr) 30px;height:100vh;background:var(--chrome)}
+#wside{grid-row:1/3;display:flex;flex-direction:column;min-height:0;overflow-y:auto;background:var(--chrome);border-right:1px solid var(--border);padding:0 8px 8px}
+#wmain{display:flex;flex-direction:column;min-width:0;min-height:0}
+#wpanel{display:flex;flex-direction:column;min-height:0;margin:8px 8px 0 0;background:var(--bg);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+#wstatus{grid-column:2/4;display:flex;align-items:center;gap:16px;padding:0 14px;font-size:12px;color:var(--muted);border-top:1px solid var(--border);white-space:nowrap;overflow:hidden}
+#wstatus span{display:inline-flex;align-items:center;gap:5px}#wstatus .ico{width:12px;height:12px}#wstatus .warn{color:var(--blocked)}#wstatus .ok{color:var(--done)}
+.flex{flex:1}
+button.ghost{background:transparent;border-color:transparent;color:var(--muted);padding:4px 8px;font-size:13px}
+button.ghost:hover{background:var(--raised);color:var(--fg)}
+/* sidebar */
+.shead{display:flex;align-items:center;gap:8px;height:46px;padding:0 6px;font-size:15px}
+.shead .logo{font-size:16px}
+.ssec{padding:10px 8px 4px;font-size:12px;color:var(--dim)}
+.smachine{display:flex;align-items:center;gap:6px;padding:6px 8px 4px;font-size:12px;color:var(--dim)}
+.okdot{width:6px;height:6px;border-radius:50%;background:var(--done)}
+.sitem{display:flex;align-items:center;gap:9px;height:34px;padding:0 8px;border-radius:8px;cursor:pointer;font-size:14px;min-width:0}
+.sitem:hover{background:var(--raised)}.sitem.sel{background:var(--border)}
+.tile{flex:none;width:20px;height:20px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700}
+.sitem .sname{flex:none;max-width:60%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sitem .sright{flex:1;min-width:0;text-align:right;font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sitem .behind{color:var(--bad)}.sitem .ahead{color:var(--done)}
+.spin{flex:none;width:11px;height:11px;border-radius:50%;border:2px solid var(--working);border-top-color:transparent;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+details.sfold{margin-top:12px;border-top:1px solid var(--border);padding-top:4px}
+details.sfold>summary{list-style:none;display:flex;align-items:center;gap:6px;height:32px;padding:0 8px;font-size:12px;color:var(--dim);cursor:pointer}
+details.sfold>summary::-webkit-details-marker{display:none}
+details.sfold .mark{width:10px;font-size:9px}details.sfold .mark::before{content:"▸"}details.sfold[open] .mark::before{content:"▾"}
+.sfoot{margin-top:auto;padding-top:10px;display:flex;flex-direction:column;align-items:flex-start;border-top:1px solid var(--border)}
+/* tab bar */
+#wtabs{flex:none;display:flex;align-items:center;gap:6px;height:46px;padding:0 10px;overflow-x:auto}
+.pill-btn,.tpill{flex:none;display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border:1px solid var(--border);border-radius:9px;background:var(--bg);color:var(--fg);font-size:14px;cursor:pointer;white-space:nowrap}
+.pill-btn .ico,.tpill .ico{width:14px;height:14px;color:var(--muted)}
+.tpill{background:transparent;border-color:transparent;color:var(--muted)}
+.tpill:hover{background:var(--raised)}
+.tpill.on{background:var(--bg);border-color:var(--border);color:var(--fg)}
+.tpill .x{padding:0 4px;border:0;background:transparent;color:var(--dim);font-size:16px;line-height:1;visibility:hidden}
+.tpill:hover .x,.tpill.on .x{visibility:visible}
+.newwrap{position:relative}
+.newmenu{display:none;position:absolute;right:0;top:36px;z-index:30;min-width:180px;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.15)}
+.newmenu.on{display:block}
+.newmenu div{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:14px}
+.newmenu div:hover{background:var(--raised)}.newmenu .ico{width:14px;height:14px}
+/* terminal cards */
+#wpanes{flex:1;min-height:0;display:flex;padding:0 8px 8px}
+#wpanes>.split{flex:1}
+.split{display:flex;gap:8px;min-width:0;min-height:0;align-items:stretch}.split.vsplit{flex-direction:column}
+.tcard{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--term-bg);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.tcard.focus{border-color:var(--accent)}
+.chead{flex:none;display:flex;align-items:center;gap:8px;height:34px;padding:0 12px;border-bottom:1px solid var(--border);background:var(--bg);font-size:13.5px;white-space:nowrap;overflow:hidden}
+.chead .ico{width:14px;height:14px;color:var(--muted)}.chead b{font-weight:600}
+.chead .cwd{color:var(--dim)}.chead .sub{color:var(--dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;min-width:0}.chead .addr{color:var(--dim);font-size:11px}
+.cbody{flex:1;min-height:0;position:relative}
+.xthost{position:absolute;inset:6px 4px 4px 10px}
+.xthost.lost::after{content:"Disconnected · reconnecting…";position:absolute;top:6px;right:6px;padding:4px 10px;border-radius:6px;background:var(--bad);color:#fff;font-size:12px}
+.tcard.mod .cnote{padding:20px}
+.wempty{margin:auto;text-align:center;color:var(--muted)}.wempty .tile{width:44px;height:44px;font-size:20px;border-radius:10px}
+.wempty h2{color:var(--fg);margin:12px 0 2px}
+/* right panel: one section at a time */
+.seg{flex:none;display:flex;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border)}
+.seg button{padding:5px 11px;font-size:13px;border-radius:8px;background:transparent;border-color:var(--border);color:var(--muted)}
+.seg button.on{background:var(--raised);color:var(--fg);font-weight:600}
+.seg .n{font-size:11px;color:var(--dim)}
+.wpbody{flex:1;min-height:0;overflow-y:auto}
+.wpbody>header.bar,.wpbody>.actions,.wpbody>#tabs{display:none}
+#wpanel details.fold{margin:0;border:0;border-radius:0;background:transparent}
+#wpanel details.fold:not(#fbranch)>summary{display:none}
+#wpanel details.fold[open]>summary{border-bottom:1px solid var(--border)}
+#wpanel[data-seg=changes] details.fold:not(#fchanges):not(#fbranch),
+#wpanel[data-seg=tasks] details.fold:not(#ftasks),
+#wpanel[data-seg=prs] details.fold:not(#fprs),
+#wpanel[data-seg=ai] details.fold:not(#fai){display:none}
+#wpanel .commit textarea{min-height:110px}
+/* add-project page and dialogs on a wide screen */
+body.wide #app[data-v=add]{max-width:720px;margin:0 auto;height:auto;overflow:auto}
+body.wide .fbfoot{max-width:720px;margin:0 auto}
+body.wide #app[data-v=add]{height:100vh;overflow-y:auto}
+body.wide .sheet{inset:6vh 0 auto 0;margin:0 auto;width:min(820px,92vw);height:88vh;border:1px solid var(--border);border-radius:12px;box-shadow:0 0 0 100vmax rgba(0,0,0,.35),0 20px 60px rgba(0,0,0,.3);overflow:hidden}

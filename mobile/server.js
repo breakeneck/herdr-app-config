@@ -193,6 +193,13 @@ function walk(node, out) {
   else (node.children || []).forEach((c) => walk(c, out));
   return out;
 }
+// A tab's split tree for the wide (desktop) layout: rows/columns with weights, terminal or mod leaves.
+function strip(n) {
+  if (!n) return null;
+  const w = n.size && n.size.weight;
+  if (n.type === 'block') { const c = n.content || {}; return { t: c.terminal || null, mod: c.mod || null, w }; }
+  return { type: n.type, w, children: (n.children || []).map(strip).filter(Boolean) };
+}
 function buildState() {
   const tmap = new Map(terminals.map((t) => [t.address, t]));
   const spaces = ((doc && doc.spaces) || []).map((s) => {
@@ -206,7 +213,7 @@ function buildState() {
         return { address: t.address, title: t.title || '', program: (t.foreground && t.foreground.name) || (t.argv && t.argv[0]) || '', app: (t.status && t.status.app) || '', status: st || 'idle', msg: (t.status && t.status.msg) || '', cwd: t.cwd, cols: t.cols, rows: t.rows };
       });
       status = worst(status, tstatus);
-      return { id: tb.id, name: tb.name || '', index: i + 1, status: tstatus, terminals: terms };
+      return { id: tb.id, name: tb.name || '', index: i + 1, status: tstatus, terminals: terms, root: strip(tb.root) };
     });
     return { id: s.id, name: s.name, folder: s.folder, status, tabs, _cwds: tabs.flatMap((t) => t.terminals.map((x) => x.cwd)) };
   });
@@ -224,7 +231,8 @@ function buildState() {
     return { idx: i, name: p.name, path: p.path, git: g || null, open: sp.length > 0, status: sp.length ? status : '', spaces: sp.map((s) => s.id) };
   });
   for (const s of spaces) delete s._cwds;
-  return { projects: plist, spaces, other: spaces.filter((s) => !owner.has(s.id)).map((s) => s.id), time: Date.now() };
+  let colors = {}; try { colors = conf.wb().colors || {}; } catch {}
+  return { projects: plist, spaces, other: spaces.filter((s) => !owner.has(s.id)).map((s) => s.id), colors, machine: MACHINE, time: Date.now() };
 }
 let lastJson = '', rebuildTimer = null, stateObj = { projects: [], spaces: [], other: [] };
 function scheduleRebuild() { if (!rebuildTimer) rebuildTimer = setTimeout(rebuild, 50); }

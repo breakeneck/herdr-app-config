@@ -18,6 +18,7 @@ function applyTheme() {
   const m = document.querySelector('meta[name=theme-color]');
   if (m) m.content = isLight() ? '#ffffff' : '#1c1f26';
   if (term) term.options.theme = isLight() ? XT_LIGHT : XT_DARK;
+  if (typeof wideTheme === 'function') wideTheme();
 }
 function cycleTheme() { try { localStorage.setItem('hm-theme', THEMES[(THEMES.indexOf(themePref()) + 1) % 3]); } catch {} applyTheme(); render(); }
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
@@ -60,6 +61,7 @@ function route() {
 }
 function render() {
   if (!view) return route();
+  if (isWide() && view.kind !== 'add') return renderWide();
   const app = $('#app');
   if (view.kind === 'home') app.innerHTML = home();
   else if (view.kind === 'p') { if (!$('#fbranch') || !$('#cmsg') || app.dataset.v !== 'p' + view.id) { app.innerHTML = project(); app.dataset.v = 'p' + view.id; bind(app); enterProject(); return; } else updateProjectLive(); }
@@ -265,9 +267,14 @@ const acts = {
     const r = await api('/api/new', { project: +view.id, kind: el.dataset.kind });
     el.disabled = false;
     toast(r.ok ? 'Created' : (r.error || 'Failed'), r.ok ? 1200 : 6000);
-    if (r.ok && r.address) location.hash = '/t/' + r.address;
+    if (r.ok && r.address) {
+      // Wide: stay on the project and show the new tab once the state push has it.
+      if (isWide()) { const m = $('#newmenu'); if (m) m.classList.remove('on'); wsel.pending = r.address; renderWide(); }
+      else location.hash = '/t/' + r.address;
+    }
   },
   ...wbActs,
+  ...wideActs,
   pick(el) {
     const f = chg.files[+el.dataset.i]; if (!f) return;
     chg.open = chg.open === f.path ? null : f.path;
