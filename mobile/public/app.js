@@ -101,7 +101,9 @@ function tabsHtml(spaces) {
 }
 // ---- sections: collapsible like the desktop workbench (wb-*/section.js): click the title, ▾/▸ in front ----
 const I_BRANCH = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/></svg>'; // Lucide (ISC)
-const FOLD_DEFAULT = { branch: false, changes: true, tasks: false, prs: false, ai: false };
+const FOLD_DEFAULT = { branch: false, changes: true, tasks: false, prs: false, ai: false, blocal: true, bremote: false };
+// Local / Remote inside the Branch section: same ▾/▸ toggle, remembered.
+const subFold = (k, title, n, body) => `<details class="subfold" data-fold="${k}"${foldOpen(k) ? ' open' : ''}><summary><span class="mark"></span>${title}<span class="pill">${n}</span></summary>${body}</details>`;
 function foldOpen(k) { try { const v = localStorage.getItem('hm-fold-' + k); return v === null ? FOLD_DEFAULT[k] : v === '1'; } catch { return FOLD_DEFAULT[k]; } }
 function bindFolds(root) {
   root.querySelectorAll('details.fold').forEach((d) => (d.ontoggle = () => {
@@ -228,8 +230,9 @@ async function loadBranches(msg) {
   el.innerHTML = `<div class="actions" style="padding:0 0 10px"><button data-act="pull">Pull</button><button data-act="fetch">Fetch</button></div>
     <div style="display:flex;gap:6px;margin-bottom:8px"><input type="text" id="nb" placeholder="New branch name" autocapitalize="off" autocomplete="off"><button data-act="nbranch">Create</button></div>
     <div id="gitout">${msg || ''}</div>
-    <div class="sec" style="padding-left:0">Local</div><div class="blist">${r.local.map((b) => row(b)).join('')}</div>
-    ${r.remote.length ? `<div class="sec" style="padding-left:0">Remote</div><div class="blist">${r.remote.map((b) => row(b, 1)).join('')}</div>` : ''}`;
+    ${subFold('blocal', 'Local', r.local.length, `<div class="blist">${r.local.map((b) => row(b)).join('')}</div>`)}
+    ${r.remote.length ? subFold('bremote', 'Remote', r.remote.length, `<div class="blist">${r.remote.map((b) => row(b, 1)).join('')}</div>`) : ''}`;
+  el.querySelectorAll('details.subfold').forEach((d) => (d.ontoggle = () => { try { localStorage.setItem('hm-fold-' + d.dataset.fold, d.open ? '1' : '0'); } catch {} }));
   bind(el);
 }
 async function gitAct(body, label) {

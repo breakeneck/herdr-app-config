@@ -161,3 +161,9 @@ header.bar>button{flex:none}
 .fbpath input{flex:1;min-width:0;width:auto}
 .fbfoot input{width:auto}
 .toolrow button{flex:none}
+details.subfold{margin-top:6px}
+details.subfold>summary{list-style:none;display:flex;align-items:center;gap:6px;min-height:34px;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;user-select:none}
+details.subfold>summary::-webkit-details-marker{display:none}
+details.subfold .mark{flex:none;width:10px;font-size:9px}
+details.subfold .mark::before{content:"▸"}
+details.subfold[open] .mark::before{content:"▾"}
