@@ -167,7 +167,9 @@ function renderWide() {
     for (const v of tviews.values()) v.dispose();
     tviews.clear(); wideSig = ''; wideKey = '';
     app.dataset.v = 'wide';
-    app.innerHTML = `<div class="wshell"><aside id="wside"></aside><main id="wmain"><div id="wtabs"></div><div id="wpanes"></div></main><aside id="wpanel"></aside><footer id="wstatus"></footer></div>`;
+    app.innerHTML = `<div class="wshell"><aside id="wside"></aside><main id="wmain"><div id="wtabs"></div><div id="wpanes"></div></main><aside id="wpanel"></aside><footer id="wstatus"></footer>
+      <div class="wsplit" data-k="ws" title="Drag to resize · double-click resets"></div><div class="wsplit" data-k="wp" title="Drag to resize · double-click resets"></div></div>`;
+    initSplitters(app.querySelector('.wshell'));
   }
   const spaces = shownSpaces(), act = activeTab(spaces), p = view.kind === 'p' ? state.projects[+view.id] : null;
   const side = $('#wside'); side.innerHTML = sideHtml(); bind(side);
@@ -211,6 +213,33 @@ function renderWide() {
     if ($('#cmsg')) { wideKey = key; enterProject(); setSeg(wseg); }
   } else updateProjectLive();
 }
+
+// ---- column splitters: sidebar | terminals | panel, widths kept in localStorage ----
+const COLS = { ws: { def: 268, min: 180, max: 520 }, wp: { def: 400, min: 280, max: 900 } };
+function colWidth(k) { let v = NaN; try { v = +localStorage.getItem('hm-' + k); } catch {} return v > 0 ? v : COLS[k].def; }
+function setCol(shell, k, px) {
+  const c = COLS[k], room = innerWidth - (k === 'ws' ? colWidth('wp') : colWidth('ws')) - 360; // the terminals keep at least 360px
+  px = Math.round(Math.max(c.min, Math.min(c.max, room, px)));
+  shell.style.setProperty('--' + k, px + 'px');
+  return px;
+}
+function initSplitters(shell) {
+  for (const k of Object.keys(COLS)) setCol(shell, k, colWidth(k));
+  shell.querySelectorAll('.wsplit').forEach((h) => {
+    const k = h.dataset.k;
+    h.onpointerdown = (e) => {
+      e.preventDefault(); h.setPointerCapture(e.pointerId); document.body.classList.add('coldrag'); h.classList.add('on');
+      let px = colWidth(k);
+      h.onpointermove = (m) => { px = setCol(shell, k, k === 'ws' ? m.clientX : innerWidth - m.clientX); };
+      h.onpointerup = h.onpointercancel = () => {
+        h.onpointermove = h.onpointerup = h.onpointercancel = null; document.body.classList.remove('coldrag'); h.classList.remove('on');
+        try { localStorage.setItem('hm-' + k, String(px)); } catch {}
+      };
+    };
+    h.ondblclick = () => { try { localStorage.removeItem('hm-' + k); } catch {} setCol(shell, k, COLS[k].def); };
+  });
+}
+addEventListener('resize', () => { const sh = $('.wshell'); if (sh) for (const k of Object.keys(COLS)) setCol(sh, k, colWidth(k)); });
 
 const wideActs = {
   wtab(el, e) { if (e && e.target.closest('.x')) return; selectTab(el.dataset.t); },
