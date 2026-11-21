@@ -60,7 +60,10 @@ function md(src) {
 
 // ---- sheet: a full-screen page over the project (Back closes it) ----
 let sheetOn = false;
+// Wide: a list popup (Tasks, PRs) opens its details in the same popup; ‹ goes back to the list.
+let sheetList = null, sheetPrev = null;
 function openSheet(title, html) {
+  if (sheetOn && sheetList && isWide() && !sheetPrev && !html.includes('id="tbody"') && !html.includes('id="prbody"')) sheetPrev = sheetList;
   const s = $('#sheet');
   $('#sheettitle').textContent = title;
   $('#sheetbody').innerHTML = html;
@@ -70,7 +73,10 @@ function openSheet(title, html) {
   bind(s);
 }
 function sheetBody(html) { $('#sheetbody').innerHTML = html; bind($('#sheet')); }
+// After an action in a popup: back to its list (wide), else closed.
+function sheetDone() { if (isWide() && sheetList && sheetOn) { sheetPrev = null; sheetList(); } else closeSheet(); }
 function closeSheet(fromPop) {
+  sheetList = null; sheetPrev = null;
   if (!sheetOn) return;
   sheetOn = false; $('#sheet').className = 'sheet';
   if (!fromPop) history.back();
@@ -174,7 +180,7 @@ async function openTask(id) {
     toast('Moving…', 10000);
     const r = await api('/api/task-move', { project: +view.id, id, group: mv.value });
     toast(r.ok ? 'Moved' : r.error || 'Move failed', r.ok ? 1500 : 6000);
-    if (r.ok) { closeSheet(); loadTasks(true); }
+    if (r.ok) { sheetDone(); loadTasks(true); }
   };
 }
 function sourceSheet() {
@@ -187,7 +193,7 @@ function sourceSheet() {
 async function setSource(source) {
   const r = await api('/api/task-source', { project: +view.id, source });
   if (!r.ok) return toast(r.error || 'failed');
-  wb.tasks = source; tk.data = null; closeSheet(); loadTasks();
+  wb.tasks = source; tk.data = null; sheetDone(); loadTasks();
 }
 
 // ---- pull requests ----
@@ -325,7 +331,7 @@ function enterAdd() {
 }
 
 const wbActs = {
-  sheetclose() { closeSheet(); },
+  sheetclose() { if (sheetPrev) { const f = sheetPrev; sheetPrev = null; f(); } else closeSheet(); },
   gen() {
     if (genBusy || !chg.files.length) return;
     const paths = chg.files.filter((f) => !chg.unc.has(f.path)).map((f) => f.path);
@@ -393,7 +399,7 @@ const wbActs = {
     const r = await api('/api/mr-create', { project: +mr.pid, target: $('#mrinto').value, title, description: $('#mrbody').value, draft: $('#mrdraft').checked });
     b.disabled = false; b.textContent = 'Create';
     if (!r.ok) return toast(r.error || 'failed', 10000);
-    toast('Created', 2000); closeSheet(); pr.list = null; loadPrs();
+    toast('Created', 2000); pr.list = null; sheetDone(); loadPrs();
   },
   fbgo() { fbGo($('#fbin').value.trim() || '~'); },
   fbinto(el) { fbGo(el.dataset.p); },
@@ -408,3 +414,5 @@ const wbActs = {
     location.hash = '/p/' + r.idx;
   },
 };
+
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetOn && isWide()) closeSheet(); });

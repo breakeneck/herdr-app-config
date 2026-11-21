@@ -90,18 +90,21 @@ function selectTab(id) {
 }
 
 // ---- the parts ----
+// Sidebar sections (Spaces, Projects) fold on their title; remembered.
+function sideOpen(k, def) { try { const v = localStorage.getItem('hm-fold-' + k); return v === null ? def : v === '1'; } catch { return def; } }
 function sideHtml() {
   const open = state.projects.filter((p) => p.open), closed = state.projects.filter((p) => !p.open);
   const sel = (k, id) => view.kind === k && String(view.id) === String(id) ? ' sel' : '';
   const item = (go, name, right, status, cls) => `<div class="sitem${cls}" data-go="${go}">${tile(name)}<span class="sname">${esc(name)}</span><span class="sright">${right}</span>${statusMark(status)}</div>`;
   const br = (g) => g ? `${esc(g.branch)}${g.behind ? ` <span class="behind">↓${g.behind}</span>` : ''}${g.ahead ? ` <span class="ahead">↑${g.ahead}</span>` : ''}` : '';
   let h = `<div class="shead"><span class="logo">❖</span><b>Herdr</b><span class="flex"></span><button class="ghost" data-go="/add" title="Add project">＋</button></div>
-    <div class="ssec">Spaces</div><div class="smachine">${esc(state.machine || 'server')}<span class="okdot"></span></div>`;
+    <details class="sfold spaces" data-fold="wspaces"${sideOpen('wspaces', true) ? ' open' : ''}><summary><span class="mark"></span>Spaces</summary>
+    <div class="smachine">${esc(state.machine || 'server')}<span class="okdot"></span></div>`;
   h += open.map((p) => item('/p/' + p.idx, p.name, br(p.git), p.status, sel('p', p.idx))).join('');
   h += state.other.map(spaceById).filter(Boolean).map((s) => item('/o/' + encodeURIComponent(s.id), s.name || short(s.folder), '', s.status, sel('o', s.id))).join('');
   if (!open.length && !state.other.length) h += '<div class="cnote">No open spaces</div>';
-  const fo = foldOpen('wprojects');
-  h += `<details class="sfold" data-fold="wprojects"${fo ? ' open' : ''}><summary><span class="mark"></span>Projects<span class="pill">${closed.length}</span></summary>
+  h += '</details>';
+  h += `<details class="sfold" data-fold="wprojects"${sideOpen('wprojects', false) ? ' open' : ''}><summary><span class="mark"></span>Projects<span class="pill">${closed.length}</span></summary>
     ${closed.map((p) => item('/p/' + p.idx, p.name, br(p.git), '', sel('p', p.idx))).join('')}</details>`;
   h += `<div class="sfoot"><button class="ghost" data-act="theme">${THEME_ICON[themePref()]}</button></div>`;
   return h;
@@ -115,6 +118,7 @@ function tabsBarHtml(spaces, act) {
     h += `<div class="tpill${act && act.t.id === t.id ? ' on' : ''}" data-act="wtab" data-t="${esc(t.id)}">${isAgent(first) ? I_AGENT : I_TERM}<span>${esc(name)}</span>${statusMark(t.status)}<button class="x" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" title="Close tab">×</button></div>`;
   }
   h += '<span class="flex"></span>';
+  if (p) h += `<button class="pill-btn${wpanelOn ? ' on' : ''}" id="wchanges" data-act="wpanel" title="Show or hide Changes">${I_BRANCH}Changes</button>`;
   if (p) h += `<div class="newwrap"><button class="ghost" data-act="wnew" title="New tab">＋</button><div class="newmenu" id="newmenu"><div data-act="new" data-kind="claude">${I_AGENT} Claude Code</div><div data-act="new" data-kind="shell">${I_TERM} Shell</div></div></div>`;
   return h;
 }
@@ -136,20 +140,28 @@ function statusHtml(p, spaces) {
 }
 
 // ---- render ----
-const SEGS = [['changes', 'Changes', 'ccount'], ['tasks', 'Tasks', 'tcount'], ['prs', 'PR', 'prcount'], ['ai', 'AI', null]];
-let wseg = 'changes';
-try { wseg = localStorage.getItem('hm-wseg') || 'changes'; } catch {}
-function setSeg(k) {
-  wseg = k; try { localStorage.setItem('hm-wseg', k); } catch {}
-  const panel = $('#wpanel'); if (!panel) return;
-  panel.dataset.seg = k;
-  panel.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.k === k));
-  const d = $('#f' + k); if (d && !d.open) d.open = true; // its toggle event loads it
+// The Changes panel shows or hides like the desktop's (the tab bar's Changes button); kept per browser.
+let wpanelOn = true;
+try { wpanelOn = localStorage.getItem('hm-wpanel') !== '0'; } catch {}
+function applyPanel() {
+  const sh = $('.wshell'); if (sh) sh.classList.toggle('nopanel', !wpanelOn);
+  const b = $('#wchanges'); if (b) b.classList.toggle('on', wpanelOn);
 }
-function segCounts() {
-  for (const [k, , id] of SEGS) { const b = $(`#wpanel .seg button[data-k=${k}] .n`), src = id && $('#' + id); if (b) b.textContent = src ? src.textContent : ''; }
+// The panel: Changes always; Tasks and PR open as popups from its header, AI models from ⋯.
+function panelHtml() {
+  const p = state.projects[+view.id];
+  if (!p) return '';
+  return `<div class="phead"><b>Changes</b><span class="pill" id="ccount"></span>
+    <button class="small" data-act="wtasks">Tasks <span class="n" id="tcount"></span></button><button class="small" data-act="wprs">PR <span class="n" id="prcount"></span></button>
+    <span class="flex"></span><button class="ghost" data-act="wai" title="AI models">⋯</button></div>
+  <div class="wpbody">
+    ${fold('branch', `${I_BRANCH}<span class="ft" id="pgit">${gitLine(p.git) || 'Branch'}</span>`, '<div id="branches" class="fbody">Loading...</div>')}
+    <div id="tabs" hidden></div>
+    <details class="fold" id="fchanges" data-fold="wchanges" open><summary></summary>
+    <div id="changes"><div id="callrow"></div><div id="clist"><div class="cnote">Loading changes…</div></div>
+    <div class="commit"><textarea id="cmsg" rows="2" placeholder="Commit message" autocomplete="off"></textarea><div class="crow"><button id="cgen" data-act="gen" disabled>✦ Generate</button><span class="sub" id="cinfo"></span><button id="cbtn" data-act="commit" disabled>Commit</button></div><div class="sub" id="cgenm"></div></div></div></details>
+  </div>`;
 }
-setInterval(() => { if (isWide()) segCounts(); }, 1000);
 
 function renderWide() {
   const app = $('#app');
@@ -173,7 +185,7 @@ function renderWide() {
   }
   const spaces = shownSpaces(), act = activeTab(spaces), p = view.kind === 'p' ? state.projects[+view.id] : null;
   const side = $('#wside'); side.innerHTML = sideHtml(); bind(side);
-  const sf = side.querySelector('details.sfold'); if (sf) sf.ontoggle = () => { try { localStorage.setItem('hm-fold-wprojects', sf.open ? '1' : '0'); } catch {} };
+  side.querySelectorAll('details.sfold').forEach((d) => (d.ontoggle = () => { try { localStorage.setItem('hm-fold-' + d.dataset.fold, d.open ? '1' : '0'); } catch {} }));
   const tabs = $('#wtabs'); tabs.innerHTML = tabsBarHtml(spaces, act); bind(tabs);
   tabs.querySelectorAll('.tpill .x').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); acts.closetab(b); }));
   $('#wstatus').innerHTML = statusHtml(p, spaces);
@@ -203,14 +215,14 @@ function renderWide() {
   }
   if (act) panes.querySelectorAll('.tcard[data-addr]').forEach((c) => { const x = act.t.terminals.find((y) => y.address === c.dataset.addr); c.querySelector('.chead').innerHTML = x ? cardHead(x) : `<span class="sub">${esc(c.dataset.addr)} · ended</span>`; });
 
-  // The right panel: the project's sections (the same as on the phone), one at a time.
+  // The right panel: the project's Changes (Tasks / PR / AI open as popups from its header).
   const panel = $('#wpanel');
+  applyPanel();
   if (!p) { if (wideKey !== key) { wideKey = key; panel.innerHTML = `<div class="cnote" style="padding:20px">${view.kind === 'o' ? 'This space is not one of your projects: changes, tasks and PRs show for projects.' : ''}</div>`; } return; }
   if (wideKey !== key || !$('#cmsg')) {
-    panel.innerHTML = `<div class="seg">${SEGS.map(([k, l]) => `<button data-k="${k}">${l} <span class="n"></span></button>`).join('')}</div><div class="wpbody">${project()}</div>`;
-    panel.querySelectorAll('.seg button').forEach((b) => (b.onclick = () => setSeg(b.dataset.k)));
+    panel.innerHTML = panelHtml();
     bind(panel);
-    if ($('#cmsg')) { wideKey = key; enterProject(); setSeg(wseg); }
+    if ($('#cmsg')) { wideKey = key; enterProject(); }
   } else updateProjectLive();
 }
 
@@ -242,8 +254,12 @@ function initSplitters(shell) {
 addEventListener('resize', () => { const sh = $('.wshell'); if (sh) for (const k of Object.keys(COLS)) setCol(sh, k, colWidth(k)); });
 
 const wideActs = {
+  wpanel() { wpanelOn = !wpanelOn; try { localStorage.setItem('hm-wpanel', wpanelOn ? '1' : '0'); } catch {} applyPanel(); },
+  wtasks() { sheetList = wideActs.wtasks; sheetPrev = null; openSheet('Tasks', '<div id="tbody"></div>'); if (tk.data) renderTasks(); loadTasks(true); },
+  wprs() { sheetList = wideActs.wprs; sheetPrev = null; openSheet(wb.repo && wb.repo.host && !wb.repo.github ? 'Merge requests' : 'Pull requests', '<div id="prbody"></div>'); if (pr.list) renderPrs(); loadPrs(true); },
+  wai() { sheetList = null; sheetPrev = null; openSheet('AI models', '<div id="aibody" class="fbody"></div>'); renderAi(); },
   wtab(el, e) { if (e && e.target.closest('.x')) return; selectTab(el.dataset.t); },
   wnew(el, e) { e.stopPropagation(); $('#newmenu').classList.toggle('on'); },
-  wbranch() { setSeg('changes'); const d = $('#fbranch'); if (d) { d.open = !d.open; if (d.open) d.scrollIntoView({ block: 'nearest' }); } },
+  wbranch() { if (!wpanelOn) wideActs.wpanel(); const d = $('#fbranch'); if (d) { d.open = !d.open; if (d.open) d.scrollIntoView({ block: 'nearest' }); } },
 };
 document.addEventListener('click', (e) => { const m = $('#newmenu'); if (m && !e.target.closest('.newwrap')) m.classList.remove('on'); });
