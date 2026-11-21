@@ -101,3 +101,63 @@ details.fold .ft{font-weight:600;min-width:0;white-space:nowrap;overflow:hidden;
 .crow{display:flex;align-items:center;gap:8px}.crow .sub{flex:1;color:var(--dim);font-size:11.5px}
 .commit button:disabled{color:var(--dim)}
 .commit button:not(:disabled){background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+/* workbench: tasks, pull requests, AI, sheets, folder browser */
+button.small{padding:4px 9px;font-size:12px;border-radius:6px}
+button.small.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+button:disabled{opacity:.55}
+a.btn{text-decoration:none;display:inline-block}
+select{font:inherit;font-size:13px;color:var(--fg);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 8px;max-width:100%}
+.toolrow{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border)}
+.toolrow .sub{flex:1;min-width:0;color:var(--dim);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tgroup{padding:10px 12px 4px;font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+.tgroup span{font-weight:400;margin-left:4px}
+.task{display:flex;align-items:center;gap:7px;min-height:38px;padding:4px 12px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13.5px}
+.task:active,.pr:active,.frow:active{background:var(--raised)}
+.task .tkey{flex:none;color:var(--dim);font-size:11.5px}
+.task .ttitle{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lbl{flex:none;width:10px;height:6px;border-radius:3px}
+.pr{display:flex;align-items:center;gap:10px;min-height:46px;padding:6px 12px;border-bottom:1px solid var(--border);cursor:pointer}
+.pr .main{flex:1;min-width:0}.pr .name{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pr .sub{color:var(--dim);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot.bad{background:var(--bad);border-color:var(--bad)}
+.airow{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:12.5px;color:var(--muted)}
+.commit .crow #cgen{flex:none}
+#cgenm{font-size:11px;color:var(--dim);margin-top:-4px}
+.sheet{position:fixed;inset:0;z-index:20;background:var(--bg);display:none;flex-direction:column}
+.sheet.on{display:flex}
+.sheet header.bar{position:static;flex:none}
+#sheetbody{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+.pad{padding:10px 14px}
+.pad h2{font-size:17px;line-height:1.3;margin:2px 0 10px}
+.meta2{display:flex;flex-direction:column;gap:3px;font-size:12.5px}
+.meta2 div{display:flex;gap:10px}.meta2 span{flex:none;width:76px;color:var(--dim)}.meta2 b{font-weight:500;min-width:0;overflow-wrap:anywhere}
+.mdbody,.cmt{font-size:14px;line-height:1.45;overflow-wrap:anywhere}
+.mdbody p,.cmt p{margin:6px 0}.mdbody ul,.mdbody ol,.cmt ul,.cmt ol{margin:6px 0;padding-left:22px}
+.mdbody h3,.mdbody h4,.mdbody h5,.mdbody h6{margin:12px 0 4px;font-size:15px}
+.mdbody code,.cmt code{font:12px ui-monospace,Menlo,monospace;background:var(--raised);border-radius:4px;padding:1px 4px}
+pre.code{font:12px/1.5 ui-monospace,Menlo,monospace;background:var(--chrome);border:1px solid var(--border);border-radius:8px;padding:8px;overflow-x:auto}
+blockquote{margin:6px 0;padding-left:10px;border-left:3px solid var(--border);color:var(--muted)}
+.tablewrap{overflow-x:auto}.tablewrap table{border-collapse:collapse;font-size:12.5px}.tablewrap td{border:1px solid var(--border);padding:3px 6px}
+a{color:var(--accent)}
+.cmt{background:var(--chrome);border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin:8px 0}
+.cmeta{font-size:12px;color:var(--muted)}.cmeta span{color:var(--dim);margin-left:4px}
+.card textarea{font-size:13px;resize:vertical}
+.card h3 .sub{font-weight:400;font-size:11.5px;color:var(--dim);margin-left:6px}
+.mrform{display:flex;flex-direction:column;gap:6px}
+.mrform label{font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;margin-top:6px}
+.mrform label.lrow{display:flex;align-items:center;gap:8px}.mrform label.lrow .sub{flex:1;text-transform:none;font-weight:400}
+.mrform label.chk{text-transform:none;font-size:14px;color:var(--fg);font-weight:500}
+.frombr{padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--chrome);font-size:14px}
+button.wide{width:100%;margin-top:8px;padding:11px}
+.commits{font-size:12.5px;display:flex;flex-direction:column;gap:4px}.commits code{color:var(--dim)}
+.fbpath{display:flex;gap:6px;padding:8px 12px;position:sticky;top:45px;z-index:4;background:var(--bg);border-bottom:1px solid var(--border)}
+.fbpath input{font:13px ui-monospace,Menlo,monospace}
+#fblist{padding-bottom:140px}
+.frow{padding:11px 14px;border-bottom:1px solid var(--border);font-size:14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.frow.up{color:var(--muted)}
+.fbfoot{position:fixed;left:0;right:0;bottom:0;z-index:6;display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:var(--chrome);border-top:1px solid var(--border)}
+.fbfoot input{flex:1;min-width:0}.fbfoot .sub{width:100%;font-size:11.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+header.bar>button{flex:none}
+.fbpath input{flex:1;min-width:0;width:auto}
+.fbfoot input{width:auto}
+.toolrow button{flex:none}

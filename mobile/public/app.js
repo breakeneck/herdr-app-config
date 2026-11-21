@@ -54,6 +54,7 @@ function route() {
   const h = location.hash.slice(1) || '/';
   const [, kind, id] = h.split('/');
   view = { kind: kind || 'home', id: id ? decodeURIComponent(id) : null };
+  if (sheetOn) { sheetOn = false; $('#sheet').className = 'sheet'; }
   if (view.kind !== 't') closeTerm();
   render();
 }
@@ -61,9 +62,10 @@ function render() {
   if (!view) return route();
   const app = $('#app');
   if (view.kind === 'home') app.innerHTML = home();
-  else if (view.kind === 'p') { if (!$('#fbranch') || app.dataset.v !== 'p' + view.id) { app.innerHTML = project(); app.dataset.v = 'p' + view.id; bind(app); enterProject(); return; } else updateProjectLive(); }
+  else if (view.kind === 'p') { if (!$('#fbranch') || !$('#cmsg') || app.dataset.v !== 'p' + view.id) { app.innerHTML = project(); app.dataset.v = 'p' + view.id; bind(app); enterProject(); return; } else updateProjectLive(); }
   else if (view.kind === 'o') { app.innerHTML = project(); app.dataset.v = 'o' + view.id; }
   else if (view.kind === 't') { if (!term) openTerm(view.id); return; }
+  else if (view.kind === 'add') { if (app.dataset.v !== 'add') { app.innerHTML = addView(); app.dataset.v = 'add'; enterAdd(); } return; }
   if (view.kind === 'home') app.dataset.v = 'home';
   bind(app);
 }
@@ -73,7 +75,7 @@ function bind(root) {
 }
 
 function home() {
-  let h = `<header class="bar"><h1>Herdr</h1><button data-act="theme">${THEME_ICON[themePref()]}</button><button class="icon" data-act="reload">⟳</button></header>`;
+  let h = `<header class="bar"><h1>Herdr</h1><button class="icon" data-go="/add" aria-label="Add project" title="Add project">+</button><button data-act="theme">${THEME_ICON[themePref()]}</button><button class="icon" data-act="reload">⟳</button></header>`;
   if (!state.projects.length && !state.spaces.length) h += `<div class="empty">Connecting...</div>`;
   h += `<div class="sec">Projects</div>`;
   const rank = (p) => (!p.open ? 3 : p.status === 'blocked' ? 0 : p.status === 'done' ? 1 : 2);
@@ -99,13 +101,15 @@ function tabsHtml(spaces) {
 }
 // ---- sections: collapsible like the desktop workbench (wb-*/section.js): click the title, ▾/▸ in front ----
 const I_BRANCH = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/></svg>'; // Lucide (ISC)
-const FOLD_DEFAULT = { branch: false, changes: true };
+const FOLD_DEFAULT = { branch: false, changes: true, tasks: false, prs: false, ai: false };
 function foldOpen(k) { try { const v = localStorage.getItem('hm-fold-' + k); return v === null ? FOLD_DEFAULT[k] : v === '1'; } catch { return FOLD_DEFAULT[k]; } }
 function bindFolds(root) {
   root.querySelectorAll('details.fold').forEach((d) => (d.ontoggle = () => {
     try { localStorage.setItem('hm-fold-' + d.dataset.fold, d.open ? '1' : '0'); } catch {}
     if (d.open && d.dataset.fold === 'branch' && !d.dataset.loaded) loadBranches();
     if (d.open && d.dataset.fold === 'changes') loadChanges();
+    if (d.open && d.dataset.fold === 'tasks') loadTasks();
+    if (d.open && d.dataset.fold === 'prs') loadPrs();
   }));
 }
 const fold = (k, title, body) => `<details class="fold" data-fold="${k}" id="f${k}"${foldOpen(k) ? ' open' : ''}><summary><span class="mark"></span>${title}</summary>${body}</details>`;
@@ -124,18 +128,24 @@ function project() {
   <div id="tabs">${p.open ? tabsHtml(sp) : '<div class="empty">No open space. The buttons create one.</div>'}</div>
   ${fold('changes', '<span class="ft">Changes</span><span class="pill" id="ccount"></span>',
     `<div id="changes"><div id="callrow"></div><div id="clist"><div class="cnote">Loading changes…</div></div>
-    <div class="commit"><textarea id="cmsg" rows="2" placeholder="Commit message" autocomplete="off"></textarea><div class="crow"><span class="sub" id="cinfo"></span><button id="cbtn" data-act="commit" disabled>Commit</button></div></div></div>`)}`;
+    <div class="commit"><textarea id="cmsg" rows="2" placeholder="Commit message" autocomplete="off"></textarea><div class="crow"><button id="cgen" data-act="gen" disabled>✦ Generate</button><span class="sub" id="cinfo"></span><button id="cbtn" data-act="commit" disabled>Commit</button></div><div class="sub" id="cgenm"></div></div></div>`)}
+  ${fold('tasks', '<span class="ft">Tasks</span><span class="pill" id="tcount"></span>', '<div id="tbody"></div>')}
+  ${fold('prs', `<span class="ft">${'Pull requests'}</span><span class="pill" id="prcount"></span>`, '<div id="prbody"></div>')}
+  ${fold('ai', '<span class="ft">AI models</span>', '<div id="aibody" class="fbody"></div>')}`;
 }
 let lastGit = '';
 function enterProject() {
+  if (!$('#cmsg')) return; // the project isn't known yet: the next state push renders it again
   lastGit = JSON.stringify((state.projects[+view.id] || {}).git || null);
   bindFolds($('#app'));
   let unc = [];
   try { unc = JSON.parse(localStorage.getItem('hm-unc-' + view.id) || '[]'); } catch {}
   chg = { pid: view.id, files: [], open: null, sig: '', unc: new Set(unc) };
-  $('#cmsg').oninput = commitState;
+  let dt; $('#cmsg').oninput = () => { commitState(); clearTimeout(dt); const pid = view.id, v = $('#cmsg').value; dt = setTimeout(() => api('/api/commit-draft', { project: +pid, text: v }), 1000); };
   if (foldOpen('branch')) loadBranches();
   loadChanges();
+  tk.data = null; pr.list = null; wb = { pid: view.id };
+  loadRepo();
 }
 function updateProjectLive() {
   const p = state.projects[+view.id]; if (!p) return;
@@ -180,6 +190,7 @@ function renderChanges() {
     return `<div class="chg${chg.open === f.path ? ' sel' : ''}" data-act="pick" data-i="${i}">${cbox(chg.unc.has(f.path) ? 0 : 1, 'check', `data-i="${i}"`)}<span class="fp"><span class="fdir">${esc(parts.length ? parts.join('/') + '/' : '')}</span><span class="fname k${k}">${esc(name)}</span></span>${f.add ? `<span class="plus">+${f.add}</span>` : ''}${f.del ? `<span class="minus">−${f.del}</span>` : ''}</div>${chg.open === f.path ? '<div class="diff" id="cdiff"><div class="cnote">Loading…</div></div>' : ''}`;
   }).join('') + (r.limited ? '<div class="cnote">Showing the first 1,000 changed files</div>' : '');
   bind(el);
+  genState();
   if (chg.open) showDiff(chg.open);
 }
 function commitState() {
@@ -245,10 +256,15 @@ const acts = {
     toast(r.ok ? 'Closed' : 'Close failed: ' + (r.error || 'error'), r.ok ? 1500 : 6000);
   },
   async new(el) {
+    if (el.disabled) return;
+    el.disabled = true;
     toast('Creating...', 10000);
     const r = await api('/api/new', { project: +view.id, kind: el.dataset.kind });
-    toast(r.ok ? 'Created' : (r.error || 'Failed'), 3000);
+    el.disabled = false;
+    toast(r.ok ? 'Created' : (r.error || 'Failed'), r.ok ? 1200 : 6000);
+    if (r.ok && r.address) location.hash = '/t/' + r.address;
   },
+  ...wbActs,
   pick(el) {
     const f = chg.files[+el.dataset.i]; if (!f) return;
     chg.open = chg.open === f.path ? null : f.path;
@@ -273,7 +289,7 @@ const acts = {
     chg.busy = false;
     if (!$('#cbtn')) return;
     $('#cbtn').textContent = 'Commit';
-    if (r.ok) { m.value = ''; toast('Committed', 1500); } else toast(r.error || 'Commit failed', 8000);
+    if (r.ok) { m.value = ''; api('/api/commit-draft', { project: +view.id, text: '' }); toast('Committed', 1500); } else toast(r.error || 'Commit failed', 8000);
     commitState();
     chg.sig = ''; loadChanges();
   },

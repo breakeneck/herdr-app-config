@@ -91,8 +91,34 @@ export default class RemoteProjects extends View {
           if (r.code === 0 && r.stdout) this.homes[m.name] = r.stdout.trim();
         } catch { /* unreachable: try again later */ }
       }
+      for (const m of this.machines) if (m.state === "connected" && this.homes[m.name]) await this.importMobile(m.name, cx);
       cx.notify();
     });
+  }
+
+  // Projects added from herdr-mobile on that machine (its ~/.config/herdr-mobile/projects.json, marked
+  // "from": "mobile") join this list; the mark is then cleared there, so this list owns them from now on.
+  async importMobile(machine, cx) {
+    const file = ".config/herdr-mobile/projects.json";
+    let data;
+    try {
+      const r = await exec("sh", ["-c", `cat "$HOME/${file}" 2>/dev/null`], { on: machine, timeout: 10000 });
+      if (r.code !== 0 || !r.stdout.trim()) return;
+      data = JSON.parse(r.stdout);
+    } catch { return; }
+    const fresh = (data.projects ?? []).filter((p) => p.from === "mobile");
+    if (!fresh.length) return;
+    let added = false;
+    for (const p of fresh) {
+      if (!this.projects.some((q) => q.machine === machine && this.abs(machine, q.path) === p.path)) {
+        this.projects.push({ machine, name: p.name || base(p.path), path: p.path }); added = true;
+      }
+      delete p.from;
+    }
+    if (added) await this.save();
+    const text = JSON.stringify(data, null, 2) + "\n";
+    await exec("sh", ["-c", `printf %s "$1" > "$HOME/${file}.tmp" && mv "$HOME/${file}.tmp" "$HOME/${file}"`, "sh", text], { on: machine, timeout: 10000 }).catch(() => {});
+    cx.notify();
   }
 
   abs(machine, path) {

@@ -239,6 +239,137 @@ function rebuild() {
   for (const c of clients) if (c.readyState === 1) c.send(msg);
 }
 
+// ---------- adopt: a new terminal becomes a tab in the herdr-app document ----------
+// Compare-and-set on the doc version; a conflict (the desktop wrote meanwhile) re-reads and retries.
+async function adopt(address, spaceId, tabId, folder, tabName) {
+  for (let i = 0; i < 6; i++) {
+    const r = await rpc('doc.get', { name: 'herdr-app' });
+    const d = r.value && typeof r.value === 'object' ? r.value : { spaces: [] };
+    d.spaces = d.spaces || [];
+    if (d.spaces.some((s) => (s.tabs || []).some((t) => walk(t.root, []).includes(address)))) return; // the desktop got there first
+    let sp = d.spaces.find((s) => s.id === spaceId);
+    if (!sp) { sp = { folder, id: spaceId, name: '', tabs: [] }; d.spaces.push(sp); }
+    sp.tabs = sp.tabs || [];
+    let tb = sp.tabs.find((t) => t.id === tabId);
+    if (!tb) sp.tabs.push(tb = { id: tabId, name: tabName || '', root: { children: [], id: tabId, type: 'row' } });
+    tb.root.children.push({ content: { terminal: address }, id: 'p' + rid(), type: 'block' });
+    try { await rpc('doc.set', { name: 'herdr-app', value: d, version: r.version }); doc = d; scheduleRebuild(); return; }
+    catch (e) { if (!/conflict/i.test(e.message)) throw e; await new Promise((ok) => setTimeout(ok, 150)); }
+  }
+  throw new Error('doc kept changing');
+}
+
+// ---------- workbench: tasks, pull requests, AI (desktop wb-tasks / wb-prs / wb-ai) ----------
+const conf = require('./lib/conf').make(CONF);
+const ai = require('./lib/ai');
+const tasksApi = require('./lib/tasks').make(conf);
+const prsApi = require('./lib/prs').make(conf, ai, tasksApi);
+const repoCache = new Map(); // project path -> repo, for a minute
+async function repoFor(idx) {
+  const pr = projectByIdx(idx); if (!pr) throw Object.assign(new Error('no project'), { code: 404 });
+  const c = repoCache.get(pr.path);
+  if (c && Date.now() - c.at < 60000) return c.repo;
+  const repo = await prsApi.repoOf(pr.path);
+  repoCache.set(pr.path, { repo, at: Date.now() });
+  return repo;
+}
+// AI work outlives the request (a phone sleeps): a job id to poll, the text also kept as a draft.
+const jobs = new Map();
+function startJob(kind, id, fn, save) {
+  for (const [jid, j] of jobs) if (j.kind === kind && j.id === id && j.state === 'running') return jid;
+  const jid = rid();
+  const j = { kind, id, state: 'running', at: Date.now() };
+  jobs.set(jid, j);
+  fn().then((out) => { j.state = 'done'; j.result = out; try { save && save(out); } catch (e) { console.error(e); } },
+    (e) => { j.state = 'error'; j.error = String(e.message || e); })
+    .finally(() => { j.done = Date.now(); for (const [k, x] of jobs) if (x.done && Date.now() - x.done > 3600e3) jobs.delete(k); });
+  return jid;
+}
+const runningJob = (kind, id) => { for (const [jid, j] of jobs) if (j.kind === kind && j.id === id && j.state === 'running') return jid; return null; };
+const guard = async (fn) => { try { return await fn(); } catch (e) { return { error: String(e.message || e), code: e.code === 404 ? 404 : 500 }; } };
+
+async function aiFor(repo) {
+  const wb = conf.wb();
+  return { models: ai.models(wb).map((m) => ({ id: m.id, name: m.name, describe: ai.describe(m) })),
+    uses: ai.USES.map(([use, label]) => { const s = ai.settingsFor(wb, use, repo.key); return { use, label, model: s.model && s.model.id, language: s.language }; }) };
+}
+async function commitMessage(pr, paths) {
+  const ch = await changedFiles(pr.path); if (!ch) throw new Error('Not a git repository');
+  const known = new Set(ch.files.map((f) => f.path)), picked = (paths || []).filter((x) => known.has(x));
+  const only = picked.length && picked.length < ch.files.length ? ['--', ...picked] : [];
+  const repo = await prsApi.repoOf(pr.path), cfg = ai.settingsFor(conf.wb(), 'commit', repo.key);
+  const g = (args) => git(ch.root, ['--literal-pathspecs', ...GIT_READ, ...args]);
+  const [st, df] = await Promise.all([g(['status', '--short', ...only]), g(['diff', ...(ch.hasHead ? ['HEAD'] : []), '--no-color', ...only])]);
+  const fresh = st.stdout.split('\n').filter((l) => l.startsWith('?? ')).map((l) => l.slice(3)).slice(0, 20);
+  let text = `Git status:\n${st.stdout}\n\nDiff:\n${df.stdout.slice(0, 60000)}`;
+  if (fresh.length) text += `\n\nNew untracked files (contents not shown): ${fresh.join(', ')}`;
+  const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template}${cfg.noBlank !== false ? ' No blank lines anywhere.' : ''} Reply with the message only — no quotes, no code fences, no explanations. ${ai.NO_TRAILERS} ${ai.languageLine(cfg.language)}`;
+  let msg = await ai.runModel(cfg.model, `${prompt}\n\n${text}`, { cwd: ch.root, language: cfg.language });
+  if (cfg.noBlank !== false) msg = msg.split('\n').filter((l) => l.trim()).join('\n');
+  if (!msg) throw new Error('the model returned nothing');
+  return { text: msg, model: cfg.model && cfg.model.name };
+}
+
+async function workbenchGet(p, q) {
+  const idx = q.get('project');
+  if (p === '/api/job') { const j = jobs.get(q.get('id') || ''); return j ? { state: j.state, result: j.result, error: j.error } : { error: 'unknown job', code: 404 }; }
+  if (p === '/api/repo') return guard(async () => {
+    const r = await repoFor(idx), pr = projectByIdx(idx), d = conf.drafts();
+    return { repo: { key: r.key, name: r.name, host: r.host, github: r.github }, ai: await aiFor(r), tasks: tasksApi.source(r.key), taskOptions: tasksApi.options(),
+      commitDraft: (d.commit || {})[pr.path] || null, commitJob: runningJob('commit', pr.path) };
+  });
+  if (p === '/api/tasks') return guard(async () => tasksApi.list((await repoFor(idx)).key, { mine: q.get('mine') === '1' }));
+  if (p === '/api/task') return guard(async () => tasksApi.detail((await repoFor(idx)).key, q.get('id')));
+  if (p === '/api/trello-boards') return guard(async () => ({ boards: await tasksApi.trelloBoards(q.get('account')) }));
+  if (p === '/api/prs') return guard(async () => ({ prs: await prsApi.list(await repoFor(idx), q.get('mine') === '1') }));
+  if (p === '/api/pr') return guard(async () => {
+    const d = await prsApi.detail(await repoFor(idx), +q.get('n'));
+    return { ...d, draft: (conf.drafts().review || {})[d.url] || null, reviewJob: runningJob('review', d.url) };
+  });
+  if (p === '/api/mr-info') return guard(async () => { const r = await repoFor(idx), info = await prsApi.createInfo(r); return { ...info, job: runningJob('mr', `${r.key}|${info.branch}`) }; });
+  if (p === '/api/mr-commits') return guard(async () => ({ commits: await prsApi.commits(await repoFor(idx), q.get('target')) }));
+  return null;
+}
+async function workbenchPost(p, b) {
+  if (p === '/api/task-source') return guard(async () => { const r = await repoFor(b.project); tasksApi.setSource(r.key, b.source || { kind: 'none' }); return { ok: true }; });
+  if (p === '/api/task-move') return guard(async () => { await tasksApi.move((await repoFor(b.project)).key, String(b.id), String(b.group)); return { ok: true }; });
+  if (p === '/api/ai-use') return guard(async () => {
+    const r = await repoFor(b.project), wb = conf.wb(), a = wb.ai || {}, all = a.project || {};
+    if (!ai.models(wb).some((m) => m.id === b.model)) throw new Error('unknown model');
+    conf.setWb({ ai: { ...a, project: { ...all, [r.key]: { ...all[r.key], [b.use]: { ...(all[r.key] || {})[b.use], model: b.model } } } } });
+    return { ok: true };
+  });
+  if (p === '/api/ai-commit') return guard(async () => {
+    const pr = projectByIdx(b.project); if (!pr) throw Object.assign(new Error('no project'), { code: 404 });
+    return { job: startJob('commit', pr.path, () => commitMessage(pr, b.paths), (out) => conf.setDraft('commit', pr.path, out.text)) };
+  });
+  if (p === '/api/commit-draft') return guard(async () => { const pr = projectByIdx(b.project); conf.setDraft('commit', pr.path, b.text ? String(b.text) : null); return { ok: true }; });
+  if (p === '/api/pr-approve') return guard(async () => { await prsApi.approve(await repoFor(b.project), +b.n, b.approve !== false); return { ok: true }; });
+  if (p === '/api/pr-comment') return guard(async () => {
+    const text = String(b.body || '').trim(); if (!text) throw new Error('empty comment');
+    await prsApi.comment(await repoFor(b.project), +b.n, text);
+    if (b.url && b.fromDraft) conf.setDraft('review', String(b.url), null);
+    return { ok: true };
+  });
+  if (p === '/api/pr-review') return guard(async () => {
+    const r = await repoFor(b.project), url = String(b.url || '');
+    return { job: startJob('review', url, () => prsApi.review(r, +b.n), (out) => conf.setDraft('review', url, { text: out.text, model: out.model, at: new Date().toISOString() })) };
+  });
+  if (p === '/api/review-draft') return guard(async () => { conf.setDraft('review', String(b.url || ''), b.text ? { text: String(b.text), at: new Date().toISOString() } : null); return { ok: true }; });
+  if (p === '/api/mr-describe') return guard(async () => {
+    const r = await repoFor(b.project), id = `${r.key}|${b.branch}`;
+    return { job: startJob('mr', id, () => prsApi.describe(r, b), (out) => conf.setDraft('mr', id, { ...((conf.drafts().mr || {})[id] || {}), title: b.title, target: b.target, description: out.text, at: Date.now() })) };
+  });
+  if (p === '/api/mr-draft') return guard(async () => { const r = await repoFor(b.project); conf.setDraft('mr', `${r.key}|${b.branch}`, { title: b.title, target: b.target, description: b.description, draft: Boolean(b.draft), at: Date.now() }); return { ok: true }; });
+  if (p === '/api/mr-create') return guard(async () => {
+    const title = String(b.title || '').trim(); if (!title) throw new Error('Title is empty');
+    const out = await prsApi.create(await repoFor(b.project), { target: String(b.target || ''), title, body: String(b.description || ''), draft: Boolean(b.draft) });
+    pollGit();
+    return { ok: true, ...out };
+  });
+  return null;
+}
+
 // ---------- http ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 const send = (res, code, body, type = 'application/json') => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body)); };
@@ -281,6 +412,19 @@ async function handleApi(req, res, url) {
     try { return send(res, 200, { lines: await fileDiff(ch, f) }); }
     catch (e) { return send(res, 500, { error: 'Cannot preview this diff (too large or unreadable): ' + e.message }); }
   }
+  if (p === '/api/folders') {
+    const want = String(url.searchParams.get('path') || '~').replace(/^~(?=$|\/)/, HOME);
+    let dir;
+    try { dir = fs.realpathSync(want); } catch { return send(res, 404, { error: 'No such folder: ' + want }); }
+    let ents;
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return send(res, 403, { error: e.code === 'EACCES' ? 'Permission denied' : e.message }); }
+    const dirs = ents.filter((e) => e.isDirectory() || (e.isSymbolicLink() && (() => { try { return fs.statSync(path.join(dir, e.name)).isDirectory(); } catch { return false; } })()))
+      .map((e) => e.name).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    const git = fs.existsSync(path.join(dir, '.git'));
+    return send(res, 200, { path: dir, home: HOME, shown: dir === HOME ? '~' : dir.startsWith(HOME + '/') ? '~' + dir.slice(HOME.length) : dir, dirs, git,
+      known: projects.some((x) => x.path === dir) });
+  }
+  if (req.method === 'GET') { const g = await workbenchGet(p, url.searchParams); if (g) return send(res, g.code || (g.error ? 500 : 200), g); }
   if (req.method !== 'POST') return send(res, 405, { error: 'POST required' });
   const body = await readBody(req);
   if (p === '/api/send') {
@@ -290,15 +434,39 @@ async function handleApi(req, res, url) {
   }
   if (p === '/api/new') {
     const pr = projectByIdx(body.project); if (!pr) return send(res, 404, { error: 'no project' });
-    const st = stateObj.projects[pr ? projects.indexOf(pr) : 0];
-    let space = st.spaces[0], cwd = pr.path;
+    const st = stateObj.projects.find((x) => x.path === pr.path);
+    let space = st && st.spaces[0], cwd = pr.path;
     if (space) { const sp = stateObj.spaces.find((s) => s.id === space); cwd = (sp && sp.folder) || cwd; }
-    const spaceId = space || 'sp' + rid();
-    const args = ['run', '--bg', '--keep', '--no-parent', '--cwd', cwd, '--label', 'herdr.space=' + spaceId, '--label', 'herdr.tab=tb' + rid(), '--json'];
+    const spaceId = space || 'sp' + rid(), tabId = 'tb' + rid();
+    const args = ['run', '--bg', '--keep', '--no-parent', '--cwd', cwd, '--label', 'herdr.space=' + spaceId, '--label', 'herdr.tab=' + tabId, '--json'];
+    // Like the desktop's launcher: the agent in the interactive shell, which stays open after it exits.
     if (body.kind === 'claude') args.push('--', 'bash', '-ic', 'claude; exec bash -i');
     const r = await run(HC, args);
-    return send(res, r.ok ? 200 : 500, r.ok ? { ok: true, out: r.stdout.trim(), newSpace: !space } : { error: (r.stderr || r.stdout).trim() });
+    if (!r.ok) return send(res, 500, { error: (r.stderr || r.stdout).trim() });
+    let address = null; try { address = JSON.parse(r.stdout).address; } catch {}
+    // The desktop app adopts labelled terminals into its document, but only while it runs: write the tab ourselves.
+    if (address) {
+      try { await adopt(address, spaceId, tabId, cwd, body.kind === 'claude' ? 'Claude Code' : ''); }
+      catch (e) { console.error('adopt', e.message); }
+    }
+    return send(res, 200, { ok: true, address, newSpace: !space });
   }
+  if (p === '/api/projects/add') {
+    let dir = String(body.path || '').replace(/^~(?=$|\/)/, HOME).replace(/\/+$/, '') || '/';
+    try { dir = fs.realpathSync(dir); if (!fs.statSync(dir).isDirectory()) throw new Error(); } catch { return send(res, 400, { error: 'Not a folder: ' + dir }); }
+    let raw = { projects: [] };
+    try { raw = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8')); if (Array.isArray(raw)) raw = { projects: raw }; } catch {}
+    raw.projects = raw.projects || [];
+    if (!raw.projects.some((x) => String(x.path).replace(/^~(?=$|\/)/, HOME).replace(/\/+$/, '') === dir)) {
+      // from: "mobile" until the desktop's Remote projects takes it over (wb-projects), see deploy.sh.
+      raw.projects.push({ machine: MACHINE, name: String(body.name || '').trim() || path.basename(dir), path: dir, from: 'mobile' });
+      fs.writeFileSync(PROJECTS_FILE + '.tmp', JSON.stringify(raw, null, 2) + '\n'); fs.renameSync(PROJECTS_FILE + '.tmp', PROJECTS_FILE);
+    }
+    loadProjects();
+    return send(res, 200, { ok: true, idx: projects.findIndex((x) => x.path === dir) });
+  }
+  const wbRes = await workbenchPost(p, body);
+  if (wbRes) return send(res, wbRes.code || (wbRes.error ? 500 : 200), wbRes);
   if (p === '/api/close-tab') {
     // Addresses come from our own copy of the herdr-app doc, never from the client.
     try { await fetchDoc(); } catch (e) { return send(res, 502, { error: 'core unavailable: ' + e.message }); }
