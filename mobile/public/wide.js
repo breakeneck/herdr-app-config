@@ -118,8 +118,8 @@ function tabsBarHtml(spaces, act) {
     h += `<div class="tpill${act && act.t.id === t.id ? ' on' : ''}" data-act="wtab" data-t="${esc(t.id)}">${isAgent(first) ? I_AGENT : I_TERM}<span>${esc(name)}</span>${statusMark(t.status)}<button class="x" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" title="Close tab">×</button></div>`;
   }
   h += '<span class="flex"></span>';
-  if (p) h += `<button class="pill-btn${wpanelOn ? ' on' : ''}" id="wchanges" data-act="wpanel" title="Show or hide Changes">${I_BRANCH}Changes</button>`;
   if (p) h += `<div class="newwrap"><button class="ghost" data-act="wnew" title="New tab">＋</button><div class="newmenu" id="newmenu"><div data-act="new" data-kind="claude">${I_AGENT} Claude Code</div><div data-act="new" data-kind="shell">${I_TERM} Shell</div></div></div>`;
+  if (p) h += `<button class="pill-btn${wpanelOn ? ' on' : ''}" id="wchanges" data-act="wpanel" title="Show or hide Changes">${I_BRANCH}Changes</button>`;
   return h;
 }
 function layoutHtml(n) {
