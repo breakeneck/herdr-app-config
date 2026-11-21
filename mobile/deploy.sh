@@ -5,7 +5,19 @@ HOST="${HOST:-server}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROJ_SRC="${PROJECTS_SRC:-$HERE/../remote-projects.json}"
 
-rsync -a --delete --exclude node_modules --exclude .git "$HERE"/ "$HOST:herdr-mobile/"
+# The server copy may have been edited there (an agent working in ~/herdr-mobile): don't wipe that.
+# Each deploy leaves .deployed (sha256 of every file it put there); anything changed or added since is drift.
+LIST='find . -path ./node_modules -prune -o -type f ! -name .deployed ! -name package-lock.json -print | sort'
+DRIFT=$(ssh "$HOST" "cd ~/herdr-mobile 2>/dev/null && [ -f .deployed ] && { sha256sum -c --quiet .deployed 2>/dev/null | cut -d: -f1; $LIST | comm -13 <(cut -c67- .deployed | sort) -; }" || true)
+if [ -n "$DRIFT" ] && [ "${FORCE:-}" != 1 ]; then
+  echo "The server has changes this repo doesn't (edited there?):" >&2
+  echo "$DRIFT" | sed 's/^/  /' >&2
+  echo "Run ./pull-from-server.sh, review and commit them, then deploy again (FORCE=1 overwrites them)." >&2
+  exit 1
+fi
+
+rsync -a --delete --exclude node_modules --exclude .git --exclude package-lock.json --exclude .deployed "$HERE"/ "$HOST:herdr-mobile/"
+ssh "$HOST" "cd ~/herdr-mobile && ln -sfn CLAUDE.md AGENTS.md && $LIST | xargs sha256sum > .deployed"  # AGENTS.md: the same brief for non-Claude agents (gitignored here)
 
 # Remote projects for this machine -> ~/.config/herdr-mobile/projects.json: the desktop's list, plus
 # projects added on the phone ("from": "mobile") that the desktop hasn't taken over yet.
@@ -32,6 +44,13 @@ print(json.dumps({"projects": out}, indent=2))
 PY
   rm -f "$CUR"
 fi
+
+# Read-only reference for agents working on the server: the desktop app's manual and the workbench
+# mods these features port (CLAUDE.md points there). Rewritten on every deploy.
+ssh "$HOST" 'mkdir -p ~/herdr-desktop-ref/mods'
+rsync -a "$HERE/../AGENTS.md" "$HOST:herdr-desktop-ref/AGENTS.md"
+rsync -a --delete --exclude '*.d.ts' --exclude jsconfig.json --exclude icons "$HERE"/../mods/wb-* "$HOST:herdr-desktop-ref/mods/"
+ssh "$HOST" 'printf "%s\n" "Read-only copy from the Mac (herdr-mobile/deploy.sh). Edits here are overwritten." "AGENTS.md: the Herdr desktop app manual. mods/wb-*: the desktop workbench mods herdr-mobile ports." > ~/herdr-desktop-ref/README'
 
 # Workbench settings (AI models, task sources) and tokens from the Keychain (NO_SECRETS=1: settings only).
 python3 "$HERE/sync-config.py" ${NO_SECRETS:+--no-secrets} "$HOST"
