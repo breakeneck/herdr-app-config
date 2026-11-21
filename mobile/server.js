@@ -143,6 +143,48 @@ async function pollGit() {
   scheduleRebuild();
 }
 setInterval(() => { if (clients.size) pollGit(); }, 10000);
+// Working-tree changes, same rules as the desktop Changes mod (defaults/mods/changes in herdr-app).
+// Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie).
+const GIT_READ = ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false'];
+const countLines = (t) => (t ? t.split('\n').length - Number(t.endsWith('\n')) : 0);
+async function changedFiles(dir) {
+  const top = await git(dir, ['rev-parse', '--show-toplevel']);
+  if (!top.ok) return null;
+  const root = top.stdout.trim(), g = (args) => git(root, [...GIT_READ, ...args]);
+  const [status, head] = await Promise.all([g(['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all']), g(['rev-parse', '--verify', 'HEAD'])]);
+  if (!status.ok) return null;
+  const stats = {};
+  const results = head.ok ? [await g(['diff', 'HEAD', '--numstat', '-z', '--no-renames'])] : [await g(['diff', '--cached', '--numstat', '-z', '--no-renames']), await g(['diff', '--numstat', '-z', '--no-renames'])];
+  for (const r of results) for (const e of r.stdout.split('\0')) {
+    const [a, d, ...parts] = e.split('\t'); if (!parts.length) continue;
+    const path = parts.join('\t'), old = stats[path] || { add: 0, del: 0 };
+    stats[path] = { add: old.add + (Number(a) || 0), del: old.del + (Number(d) || 0), binary: a === '-' };
+  }
+  const entries = status.stdout.split('\0').filter(Boolean), files = [];
+  for (const e of entries.slice(0, 1000)) {
+    const xy = e.slice(0, 2), path = e.slice(3), fresh = xy === '??';
+    const conflict = xy.includes('U') || xy === 'AA' || xy === 'DD';
+    const st = conflict ? 'U' : xy.includes('D') ? 'D' : fresh || xy.includes('A') ? 'A' : 'M';
+    files.push({ path, status: st, fresh, ...(stats[path] || { add: 0, del: 0 }) });
+  }
+  return { root, hasHead: head.ok, files, limited: entries.length > 1000 };
+}
+async function fileDiff(ch, f) {
+  let lines;
+  if (f.fresh || (!ch.hasHead && f.status === 'A')) {
+    let text = null;
+    try { const full = path.join(ch.root, f.path); if (fs.statSync(full).size <= 4e6) text = fs.readFileSync(full, 'utf8'); } catch {}
+    if (text === null) lines = ['Cannot preview this file (binary, too large, or unreadable)'];
+    else if (text.includes('\0')) lines = ['Binary file · no text diff'];
+    else { const n = countLines(text); lines = [`@@ -0,0 +1,${n} @@`, ...text.slice(0, 400000).replace(/\n$/, '').split('\n').slice(0, 1500).map((l) => '+' + l)]; }
+  } else {
+    const r = await git(ch.root, [...GIT_READ, 'diff', ...(ch.hasHead ? ['HEAD'] : []), '--no-ext-diff', '--no-textconv', '--no-color', '--', f.path]);
+    if (!r.ok) throw new Error(r.stderr.trim() || 'git diff failed');
+    const all = r.stdout.replace(/\n$/, '').split('\n'), first = all.findIndex((l) => l.startsWith('@@'));
+    lines = first < 0 ? [f.binary ? 'Binary file changed' : 'No text diff available'] : all.slice(first);
+  }
+  return lines.slice(0, 1500).map((l) => (l.length > 4000 ? l.slice(0, 4000) + '… (line truncated)' : l));
+}
 
 // ---------- state ----------
 function walk(node, out) {
@@ -224,6 +266,21 @@ async function handleApi(req, res, url) {
     const remote = rem.stdout.split('\n').filter((b) => b && b !== 'origin' && !b.endsWith('/HEAD')).map((b) => b.replace(/^origin\//, '')).filter((b) => !local.includes(b));
     return send(res, 200, { current: cur.stdout.trim(), local, remote });
   }
+  if (p === '/api/changes') {
+    const pr = projectByIdx(url.searchParams.get('project')); if (!pr) return send(res, 404, { error: 'no project' });
+    const ch = await changedFiles(pr.path);
+    if (!ch) return send(res, 200, { notRepo: true, files: [] });
+    return send(res, 200, { files: ch.files, limited: ch.limited });
+  }
+  if (p === '/api/diff') {
+    const pr = projectByIdx(url.searchParams.get('project')); if (!pr) return send(res, 404, { error: 'no project' });
+    // Only paths git itself reports as changed are accepted, never arbitrary client paths.
+    const ch = await changedFiles(pr.path);
+    const f = ch && ch.files.find((x) => x.path === url.searchParams.get('file'));
+    if (!f) return send(res, 404, { error: 'file not changed' });
+    try { return send(res, 200, { lines: await fileDiff(ch, f) }); }
+    catch (e) { return send(res, 500, { error: 'Cannot preview this diff (too large or unreadable): ' + e.message }); }
+  }
   if (req.method !== 'POST') return send(res, 405, { error: 'POST required' });
   const body = await readBody(req);
   if (p === '/api/send') {
@@ -256,6 +313,23 @@ async function handleApi(req, res, url) {
     }
     const ok = results.every((r) => r.ok);
     return send(res, ok ? 200 : 500, { ok, results, error: ok ? undefined : results.filter((r) => !r.ok).map((r) => r.terminal + ': ' + r.error).join('; ') });
+  }
+  if (p === '/api/commit') {
+    // Like wb-changes: everything checked stages all; otherwise stage and commit just the checked paths (literal).
+    const pr = projectByIdx(body.project); if (!pr) return send(res, 404, { error: 'no project' });
+    const msg = String(body.message || '').trim(); if (!msg) return send(res, 400, { error: 'empty message' });
+    const ch = await changedFiles(pr.path); if (!ch) return send(res, 400, { error: 'Not a git repository' });
+    const known = new Set(ch.files.map((f) => f.path));
+    const picked = [...new Set((Array.isArray(body.paths) ? body.paths : []).map(String))].filter((x) => known.has(x));
+    if (!picked.length) return send(res, 400, { error: 'Nothing checked' });
+    const partial = picked.length < ch.files.length || ch.limited;
+    const cmds = partial ? [['--literal-pathspecs', 'add', '-A', '--', ...picked], ['--literal-pathspecs', 'commit', '-m', msg, '--', ...picked]] : [['add', '-A'], ['commit', '-m', msg]];
+    for (const args of cmds) {
+      const r = await git(ch.root, args);
+      if (!r.ok) { pollGit(); return send(res, 409, { error: 'Commit failed: ' + (r.stderr || r.stdout).trim() }); }
+    }
+    pollGit();
+    return send(res, 200, { ok: true });
   }
   if (p === '/api/git') {
     const pr = projectByIdx(body.project); if (!pr) return send(res, 404, { error: 'no project' });
