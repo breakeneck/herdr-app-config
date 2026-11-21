@@ -103,7 +103,7 @@ function sideHtml() {
   const fo = foldOpen('wprojects');
   h += `<details class="sfold" data-fold="wprojects"${fo ? ' open' : ''}><summary><span class="mark"></span>Projects<span class="pill">${closed.length}</span></summary>
     ${closed.map((p) => item('/p/' + p.idx, p.name, br(p.git), '', sel('p', p.idx))).join('')}</details>`;
-  h += `<div class="sfoot"><button class="ghost" data-act="theme">${THEME_ICON[themePref()]}</button><button class="ghost" data-go="/add">＋ Add project</button></div>`;
+  h += `<div class="sfoot"><button class="ghost" data-act="theme">${THEME_ICON[themePref()]}</button></div>`;
   return h;
 }
 function tabsBarHtml(spaces, act) {
