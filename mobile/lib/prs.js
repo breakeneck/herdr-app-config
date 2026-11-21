@@ -56,7 +56,8 @@ function make(conf, ai, tasks) {
     const token = glToken(host);
     if (!token) throw new Error(`No GitLab token for ${host} on this server (run the desktop sync)`);
     const r = await fetch(`https://${host}/api/v4${p}`, { method, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000),
-      headers: { 'PRIVATE-TOKEN': token, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) } });
+      // git.allmylinks.com's firewall answers Node's default User-Agent with a 403 page.
+      headers: { 'PRIVATE-TOKEN': token, Accept: 'application/json', 'User-Agent': 'herdr-mobile', ...(body ? { 'Content-Type': 'application/json' } : {}) } });
     if (!r.ok) throw Object.assign(new Error(r.status === 403 ? 'GitLab refused: the token needs the api scope' : `GitLab ${r.status}: ${(await r.text()).slice(0, 160)}`), { status: r.status });
     return r.json();
   }
