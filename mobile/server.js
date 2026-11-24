@@ -453,6 +453,18 @@ async function handleApi(req, res, url) {
     return send(res, 200, { path: dir, home: HOME, shown: dir === HOME ? '~' : dir.startsWith(HOME + '/') ? '~' + dir.slice(HOME.length) : dir, dirs, git,
       known: projects.some((x) => x.path === dir) });
   }
+  if (p === '/api/reply-draft') {
+    // The terminal screen's unsent reply, per terminal (kept on the server: every device and the http and
+    // https pages see the same one). GET ?t= → { text }; POST { terminal, text } ('' removes it).
+    if (req.method === 'GET') return send(res, 200, { text: ((conf.drafts().reply || {})[url.searchParams.get('t') || '']) || '' });
+    const chunks = []; await new Promise((ok) => { req.on('data', (d) => chunks.push(d)); req.on('end', ok); req.on('error', ok); });
+    let b = {}; try { b = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch {}
+    const t = String(b.terminal || ''); if (!/^[\w\/-]+$/.test(t)) return send(res, 400, { error: 'bad terminal' });
+    const d = conf.drafts(), reply = d.reply || {}, live = new Set(terminals.map((x) => x.address));
+    if (live.size) for (const k of Object.keys(reply)) if (!live.has(k)) conf.setDraft('reply', k, null); // closed terminals
+    conf.setDraft('reply', t, String(b.text || '').trim() ? String(b.text).slice(0, 100000) : null);
+    return send(res, 200, { ok: true });
+  }
   if (p === '/api/upload') {
     // An image for an agent (pasted or picked on the phone): the raw file is the body. It is saved under
     // ~/.cache/herdr-mobile/uploads and the answer is its path, which goes into the reply text

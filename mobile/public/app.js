@@ -68,7 +68,7 @@ function render() {
   if (view.kind === 'home') app.innerHTML = home();
   else if (view.kind === 'p') { if (!$('#fbranch') || !$('#cmsg') || app.dataset.v !== 'p' + view.id) { app.innerHTML = project(); app.dataset.v = 'p' + view.id; bind(app); enterProject(); return; } else updateProjectLive(); }
   else if (view.kind === 'o') { app.innerHTML = project(); app.dataset.v = 'o' + view.id; }
-  else if (view.kind === 't') { if (!term) openTerm(view.id); return; }
+  else if (view.kind === 't') { if (term && tAddr !== view.id) closeTerm(); if (!term) openTerm(view.id); return; }
   else if (view.kind === 'add') { if (app.dataset.v !== 'add') { app.innerHTML = addView(); app.dataset.v = 'add'; enterAdd(); } return; }
   if (view.kind === 'home') app.dataset.v = 'home';
   bind(app);
@@ -329,6 +329,7 @@ const acts = {
 // ---- terminal screen ----
 let tws, fit, ctrl = false, tAddr, backHash = '/';
 function closeTerm() {
+  flushReplyDraft();
   if (tws) { tws.onclose = null; try { tws.close(); } catch {} tws = null; }
   if (term) { term.dispose(); term = null; }
   document.body.style.height = '';
@@ -379,6 +380,7 @@ function openTerm(addr) {
   $('#kctrl').onpointerdown = (e) => { e.preventDefault(); setCtrl(!ctrl); };
   $('#sendbtn').onclick = sendText;
   setupReplyBox($('#sendtxt'));
+  loadReplyDraft(addr);
   setupMic();
   $('#kpaste').onpointerdown = (e) => { e.preventDefault(); pasteClip(); };
   $('#kbd').onpointerdown = (e) => { e.preventDefault(); setKbd(!kbdOn()); };
@@ -437,7 +439,7 @@ async function sendText() {
   b.classList.add('busy'); b.disabled = true;
   let r; try { r = await api('/api/send', { terminal: tAddr, text }); } catch (e) { r = { error: e.message }; }
   b.classList.remove('busy'); b.disabled = false;
-  if (r.ok) { ta.value = ''; sizeReply(ta); } else toast(r.error || 'Send failed');
+  if (r.ok) { ta.value = ''; sizeReply(ta); replyDraftChanged(''); flushReplyDraft(); } else toast(r.error || 'Send failed');
 }
 // ---- reply box: a contenteditable (keyboards such as Gboard insert clipboard images only into rich fields) ----
 // It behaves as a plain-text box (value, disabled) for the rest of the code. An image pasted, inserted by the
@@ -481,6 +483,30 @@ async function uploadImage(blob) {
   else { ta.value = v + ins; caretEnd(ta); }
   ta.dispatchEvent(new Event('input', { bubbles: true }));
 }
+// ---- reply drafts: the unsent text of each terminal's reply box, kept on the server (/api/reply-draft) ----
+const replyDrafts = {}; // address -> text, so coming back to a terminal shows it at once
+let draftTimer = null, draftPending = null;
+async function loadReplyDraft(addr) {
+  const ta = $('#sendtxt'); if (!ta) return;
+  if (replyDrafts[addr]) { ta.value = replyDrafts[addr]; sizeReply(ta); }
+  let j; try { j = await (await fetch('/api/reply-draft?t=' + encodeURIComponent(addr))).json(); } catch { return; }
+  // the person may have typed (or left) meanwhile
+  if (tAddr !== addr || !$('#sendtxt') || ta.value || !j.text) return;
+  replyDrafts[addr] = j.text; ta.value = j.text; sizeReply(ta);
+}
+function replyDraftChanged(text) {
+  if (!tAddr) return;
+  replyDrafts[tAddr] = text; draftPending = { terminal: tAddr, text };
+  clearTimeout(draftTimer); draftTimer = setTimeout(flushReplyDraft, 600);
+}
+function flushReplyDraft() {
+  clearTimeout(draftTimer); draftTimer = null;
+  if (!draftPending) return;
+  const body = JSON.stringify(draftPending); draftPending = null;
+  try { fetch('/api/reply-draft', { method: 'POST', headers: { 'content-type': 'application/json' }, body, keepalive: true }).catch(() => {}); } catch {}
+}
+addEventListener('pagehide', flushReplyDraft);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushReplyDraft(); });
 // The reply box grows up to 120px; once it holds more than one line, Mic and Send stack in a column.
 function sizeReply(ta) {
   ta.style.height = '38px'; ta.style.height = Math.min(120, ta.scrollHeight + ta.offsetHeight - ta.clientHeight) + 'px';
@@ -582,5 +608,5 @@ async function transcribe(blob) {
   ta.value = ta.value && !/\s$/.test(ta.value) ? ta.value + ' ' + j.text : ta.value + j.text;
   ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus();
 }
-document.addEventListener('input', (e) => { if (e.target.id === 'sendtxt') sizeReply(e.target); });
+document.addEventListener('input', (e) => { if (e.target.id === 'sendtxt') { sizeReply(e.target); replyDraftChanged(e.target.value); } });
 route();
