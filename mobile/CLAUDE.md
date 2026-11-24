@@ -16,8 +16,8 @@ Desktop browser (≥1000px): a layout shaped like the Herdr desktop app's window
   rsyncs `mobile/` there with `--delete`, runs `npm install`, rewrites the systemd unit and restarts.
 - If you are an agent working **on the server** in `~/herdr-mobile`: your edits go live after
   `systemctl --user restart herdr-mobile`, but `~/herdr-mobile` is not a git checkout. Commit from the
-  server yourself: clone `git@github.com:breakeneck/herdr-app-config.git` (pushing needs a key with write access: the server's
-  default key is a deploy key of another repo, read-only here)
+  server yourself: clone `https://github.com/breakeneck/herdr-app-config.git` (https: git's credential store has a token that
+  can push; the server's SSH key is a deploy key of another repo, read-only here)
   into your scratch dir, `rsync -a --exclude node_modules --exclude .git --exclude package-lock.json
   --exclude .deployed --exclude AGENTS.md ~/herdr-mobile/ mobile/`, commit, push. Then refresh the
   server's `.deployed` (`cd ~/herdr-mobile && find . -path ./node_modules -prune -o -type f ! -name .deployed
