@@ -95,13 +95,13 @@ function sideOpen(k, def) { try { const v = localStorage.getItem('hm-fold-' + k)
 function sideHtml() {
   const open = state.projects.filter((p) => p.open), closed = state.projects.filter((p) => !p.open);
   const sel = (k, id) => view.kind === k && String(view.id) === String(id) ? ' sel' : '';
-  const item = (go, name, right, status, cls) => `<div class="sitem${cls}" data-go="${go}">${tile(name)}<span class="sname">${esc(name)}</span><span class="sright">${right}</span>${statusMark(status)}</div>`;
+  const item = (go, name, right, status, cls, unread) => `<div class="sitem${cls}" data-go="${go}">${tile(name)}<span class="sname${unread ? ' unread' : ''}">${esc(name)}</span>${udot(unread)}<span class="sright">${right}</span>${statusMark(status)}</div>`;
   const br = (g) => g ? `${esc(g.branch)}${g.behind ? ` <span class="behind">↓${g.behind}</span>` : ''}${g.ahead ? ` <span class="ahead">↑${g.ahead}</span>` : ''}` : '';
   let h = `<div class="shead"><span class="logo">❖</span><b>Herdr</b><span class="flex"></span><button class="ghost" data-go="/add" title="Add project">＋</button></div>
     <details class="sfold spaces" data-fold="wspaces"${sideOpen('wspaces', true) ? ' open' : ''}><summary><span class="mark"></span>Spaces</summary>
     <div class="smachine">${esc(state.machine || 'server')}<span class="okdot"></span></div>`;
-  h += open.map((p) => item('/p/' + p.idx, p.name, br(p.git), p.status, sel('p', p.idx))).join('');
-  h += state.other.map(spaceById).filter(Boolean).map((s) => item('/o/' + encodeURIComponent(s.id), s.name || short(s.folder), '', s.status, sel('o', s.id))).join('');
+  h += open.map((p) => item('/p/' + p.idx, p.name, br(p.git), p.status, sel('p', p.idx), p.unread)).join('');
+  h += state.other.map(spaceById).filter(Boolean).map((s) => item('/o/' + encodeURIComponent(s.id), s.name || short(s.folder), '', s.status, sel('o', s.id), s.unread)).join('');
   if (!open.length && !state.other.length) h += '<div class="cnote">No open spaces</div>';
   h += '</details>';
   h += `<details class="sfold" data-fold="wprojects"${sideOpen('wprojects', false) ? ' open' : ''}><summary><span class="mark"></span>Projects<span class="pill">${closed.length}</span></summary>
@@ -115,7 +115,7 @@ function tabsBarHtml(spaces, act) {
   for (const s of spaces) for (const t of s.tabs) {
     const first = t.terminals.find(isAgent) || t.terminals[0];
     const name = t.name || (isAgent(first) ? progName(first) : String(t.index));
-    h += `<div class="tpill${act && act.t.id === t.id ? ' on' : ''}" data-act="wtab" data-t="${esc(t.id)}">${isAgent(first) ? I_AGENT : I_TERM}<span>${esc(name)}</span>${statusMark(t.status)}<button class="x" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" title="Close tab">×</button></div>`;
+    h += `<div class="tpill${act && act.t.id === t.id ? ' on' : ''}" data-act="wtab" data-t="${esc(t.id)}">${isAgent(first) ? I_AGENT : I_TERM}<span>${esc(name)}</span>${udot(t.unread)}${statusMark(t.status)}<button class="x" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" title="Close tab">×</button></div>`;
   }
   h += '<span class="flex"></span>';
   if (p) h += `<div class="newwrap"><button class="ghost" data-act="wnew" title="New tab">＋</button><div class="newmenu" id="newmenu"><div data-act="new" data-kind="claude">${I_AGENT} Claude Code</div><div data-act="new" data-kind="shell">${I_TERM} Shell</div></div></div>`;

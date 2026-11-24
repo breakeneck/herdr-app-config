@@ -15,10 +15,15 @@ Desktop browser (≥1000px): a layout shaped like the Herdr desktop app's window
 - `~/herdr-mobile` on `server` is a **deployed copy** (no git). `mobile/deploy.sh` (run on the Mac)
   rsyncs `mobile/` there with `--delete`, runs `npm install`, rewrites the systemd unit and restarts.
 - If you are an agent working **on the server** in `~/herdr-mobile`: your edits go live after
-  `systemctl --user restart herdr-mobile`, but they are not in git. Say so when you finish, and tell
-  the person to run `mobile/pull-from-server.sh` on the Mac (copies the server's files back into the
-  repo so they can be committed). `deploy.sh` refuses to run while the server has changes the repo
-  lacks, so nothing is lost silently.
+  `systemctl --user restart herdr-mobile`, but `~/herdr-mobile` is not a git checkout. Commit from the
+  server yourself: clone `git@github.com:breakeneck/herdr-app-config.git` (pushing needs a key with write access: the server's
+  default key is a deploy key of another repo, read-only here)
+  into your scratch dir, `rsync -a --exclude node_modules --exclude .git --exclude package-lock.json
+  --exclude .deployed --exclude AGENTS.md ~/herdr-mobile/ mobile/`, commit, push. Then refresh the
+  server's `.deployed` (`cd ~/herdr-mobile && find . -path ./node_modules -prune -o -type f ! -name .deployed
+  ! -name package-lock.json -print | sort | xargs sha256sum > .deployed`) so `deploy.sh` doesn't see drift.
+  Tell the person to `git pull` on the Mac. (`mobile/pull-from-server.sh` on the Mac is the other way.)
+  `deploy.sh` refuses to run while the server has changes the repo lacks, so nothing is lost silently.
 - On the Mac there is no `node`; check syntax on the server: `~/.local/bin/node --check <file>`.
   On the server `node`/`hc` are in `~/.local/bin` (not on a non-login ssh PATH).
 

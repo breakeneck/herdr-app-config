@@ -47,6 +47,8 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && ws
 
 const spaceById = (id) => state.spaces.find((s) => s.id === id);
 const dot = (s, open) => `<span class="dot ${s || (open ? 'open' : '')}"></span>`;
+// Unread: an agent finished while nobody looked (status "done"); opening its terminal reads it.
+const udot = (n) => n > 0 ? `<span class="udot" title="${n} unread result${n > 1 ? 's' : ''}"></span>` : '';
 const gitLine = (g) => g ? `<span class="git"><b>${esc(g.branch)}</b>${g.ahead ? ` ↑${g.ahead}` : ''}${g.behind ? ` ↓${g.behind}` : ''}${g.dirty ? ' <span class="dirty">●</span>' : ''}</span>` : '';
 
 // ---- routing ----
@@ -82,27 +84,40 @@ function home() {
   h += `<div class="sec">Projects</div>`;
   const rank = (p) => (!p.open ? 3 : p.status === 'blocked' ? 0 : p.status === 'done' ? 1 : 2);
   for (const p of [...state.projects].sort((x, y) => rank(x) - rank(y))) {
-    h += `<div class="row" data-go="/p/${p.idx}">${dot(p.status, p.open)}<div class="main"><div class="name">${esc(p.name)}</div><div class="meta">${gitLine(p.git)}<span class="path">${esc(p.path.replace(/^\/home\/[^/]+/, '~'))}</span></div></div>${p.status ? `<span class="tag ${p.status}">${p.status}</span>` : ''}</div>`;
+    h += `<div class="row" data-go="/p/${p.idx}">${dot(p.status, p.open)}<div class="main"><div class="name${p.unread ? ' unread' : ''}">${esc(p.name)}${udot(p.unread)}</div><div class="meta">${gitLine(p.git)}<span class="path">${esc(p.path.replace(/^\/home\/[^/]+/, '~'))}</span></div></div>${p.working && p.status !== 'working' ? '<span class="tag working">working</span>' : ''}${p.status ? `<span class="tag ${p.status}">${p.status}</span>` : ''}</div>`;
   }
   if (state.other.length) {
     h += `<div class="sec">Other spaces</div>`;
-    for (const id of state.other) { const s = spaceById(id); if (!s) continue; h += `<div class="row" data-go="/o/${esc(s.id)}">${dot(s.status, true)}<div class="main"><div class="name">${esc(s.name)}</div><div class="sub">${esc(s.folder || '')}</div></div><span class="tag ${s.status}">${s.status}</span></div>`; }
+    for (const id of state.other) { const s = spaceById(id); if (!s) continue; h += `<div class="row" data-go="/o/${esc(s.id)}">${dot(s.status, true)}<div class="main"><div class="name${s.unread ? ' unread' : ''}">${esc(s.name)}${udot(s.unread)}</div><div class="sub">${esc(s.folder || '')}</div></div><span class="tag ${s.status}">${s.status}</span></div>`; }
   }
   return h;
 }
 
+// Compact: one row per terminal. The tab's name is shown only when it says something (not the default
+// "Tab N"); a tab with several terminals gets one thin label line above them, × closes the whole tab.
 function tabsHtml(spaces) {
   let h = '';
   for (const s of spaces) {
     for (const t of s.tabs) {
-      h += `<div class="row" style="cursor:default">${dot(t.status)}<div class="main"><div class="name" style="font-size:13px">${esc(t.name || 'Tab ' + t.index)}</div></div><span class="tag ${t.status}">${t.status}</span><button class="xbtn" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" aria-label="Close tab">×</button></div>`;
-      for (const x of t.terminals) h += `<div class="term-row" data-go="/t/${esc(x.address)}">${dot(x.status)}<div class="main"><div class="name" style="font-weight:500">${esc(x.app || x.program || x.address)} <span class="sub">${esc(x.address)}</span></div><div class="sub">${esc(x.msg || x.title)}</div></div></div>`;
+      const named = t.name && !/^Tab \d+$/.test(t.name);
+      const x = `<button class="xbtn" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" aria-label="Close tab">×</button>`;
+      const many = t.terminals.length > 1;
+      if (many) h += `<div class="tabline"><span>${esc(named ? t.name : 'Tab ' + t.index)}${udot(t.unread)}</span>${x}</div>`;
+      for (const r of t.terminals) {
+        const title = !many && named ? t.name : (r.app || r.program || r.address);
+        h += `<div class="trow${many ? ' in' : ''}" data-go="/t/${esc(r.address)}">${dot(r.status)}<div class="main"><div class="name${r.status === 'done' ? ' unread' : ''}">${esc(title)}${udot(r.status === 'done' ? 1 : 0)} <span class="addr">${esc(r.address)}</span></div><div class="sub">${esc(r.msg || r.title || '')}</div></div>${!many ? x : ''}</div>`;
+      }
+      if (!t.terminals.length) h += `<div class="trow">${dot(t.status)}<div class="main"><div class="name">${esc(named ? t.name : 'Tab ' + t.index)}</div><div class="sub">no terminals</div></div>${x}</div>`;
     }
   }
-  return h || '<div class="empty">No tabs</div>';
+  return h ? `<div class="tlist">${h}</div>` : '<div class="empty">No tabs</div>';
 }
 // ---- sections: collapsible like the desktop workbench (wb-*/section.js): click the title, ▾/▸ in front ----
 const I_BRANCH = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/></svg>'; // Lucide (ISC)
+const I_SEND = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>'; // Lucide send (ISC)
+const I_CLIP = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg>'; // Lucide paperclip (ISC)
+const I_MIC = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>'; // Lucide mic (ISC)
+const I_KBD = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></svg>'; // Lucide keyboard (ISC)
 const FOLD_DEFAULT = { branch: false, changes: true, tasks: false, prs: false, ai: false, blocal: true, bremote: false };
 // Local / Remote inside the Branch section: same ▾/▸ toggle, remembered.
 const subFold = (k, title, n, body) => `<details class="subfold" data-fold="${k}"${foldOpen(k) ? ' open' : ''}><summary><span class="mark"></span>${title}<span class="pill">${n}</span></summary>${body}</details>`;
@@ -121,12 +136,12 @@ const fold = (k, title, body) => `<details class="fold" data-fold="${k}" id="f${
 function project() {
   if (view.kind === 'o') {
     const s = spaceById(view.id);
-    return `<header class="bar"><button class="icon" data-go="/">‹</button><h1>${esc(s ? s.name : 'Space')}</h1></header>${s ? tabsHtml([s]) : '<div class="empty">Space closed</div>'}`;
+    return `<header class="bar"><button class="icon" data-go="/">‹</button><h1>${esc(s ? s.name : 'Space')}</h1><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>${s ? tabsHtml([s]) : '<div class="empty">Space closed</div>'}`;
   }
   const p = state.projects[+view.id];
   if (!p) return `<header class="bar"><button class="icon" data-go="/">‹</button><h1>?</h1></header>`;
   const sp = p.spaces.map(spaceById).filter(Boolean);
-  return `<header class="bar"><button class="icon" data-go="/">‹</button><h1>${esc(p.name)}</h1></header>
+  return `<header class="bar"><button class="icon" data-go="/">‹</button><h1>${esc(p.name)}</h1><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>
   ${fold('branch', `${I_BRANCH}<span class="ft" id="pgit">${gitLine(p.git) || 'Branch'}</span>`, '<div id="branches" class="fbody">Loading...</div>')}
   <div class="actions"><button class="primary" data-act="new" data-kind="claude">+ Claude</button><button data-act="new" data-kind="shell">+ Shell</button></div>
   <div id="tabs">${p.open ? tabsHtml(sp) : '<div class="empty">No open space. The buttons create one.</div>'}</div>
@@ -248,9 +263,10 @@ async function gitAct(body, label) {
   loadChanges();
 }
 const acts = {
-  reload() { location.reload(); },
+  reload() { if (termRefresh && $('#ts')) termRefresh(); else location.reload(); },
   theme() { cycleTheme(); },
-  async closetab(el) {
+  async closetab(el, e) {
+    if (e) e.stopPropagation();
     const s = spaceById(el.dataset.s); const t = s && s.tabs.find((x) => x.id === el.dataset.t); if (!t) return;
     const name = t.name || 'Tab ' + t.index, n = t.terminals.length;
     const risky = t.terminals.filter((x) => x.status === 'working' || x.status === 'blocked');
@@ -326,11 +342,11 @@ function openTerm(addr) {
   tAddr = addr; backHash = findOwner(addr);
   const info = state.spaces.flatMap((s) => s.tabs.flatMap((t) => t.terminals)).find((x) => x.address === addr);
   $('#app').dataset.v = 't';
-  $('#app').innerHTML = `<div class="termscreen" id="ts"><header class="bar"><button class="icon" id="back">‹</button><h1>${esc(info ? (info.app || info.program) + ' ' : '')}<span class="sub">${esc(addr)}</span></h1><span id="tdot"></span></header>
+  $('#app').innerHTML = `<div class="termscreen" id="ts"><header class="bar"><button class="icon" id="back">‹</button><h1>${esc(info ? (info.app || info.program) + ' ' : '')}<span class="sub">${esc(addr)}</span></h1><span id="tdot"></span><button class="icon" id="kbd" aria-label="Keyboard" title="Keyboard">${I_KBD}</button><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>
   <div class="conn" id="conn">Disconnected. Tap to reconnect.</div>
   <div id="xt"></div>
-  <div class="keys"><button data-k="\x1b">Esc</button><button data-k="\t">Tab</button><button id="kctrl">Ctrl</button><button data-k="\x1b[A">↑</button><button data-k="\x1b[B">↓</button><button data-k="\x1b[D">←</button><button data-k="\x1b[C">→</button><button data-k="\x03">^C</button><button data-k="\r">Enter</button></div>
-  <div class="sendbox"><textarea id="sendtxt" rows="1" placeholder="Reply (pasted + Enter)"></textarea><button class="primary" id="sendbtn">Send</button></div></div>`;
+  <div class="keys"><button data-k="\x1b">Esc</button><button data-k="\t">Tab</button><button id="kctrl">Ctrl</button><button data-k="\x03">^C</button><button id="kpaste">Paste</button><button data-k="\r">Enter</button></div>
+  <div class="sendbox"><button class="micbtn attbtn" id="attbtn" aria-label="Attach image" title="Attach image">${I_CLIP}</button><input type="file" id="attfile" accept="image/*" multiple hidden><div class="sendwrap"><div id="sendtxt" class="ta" contenteditable="true" role="textbox" aria-multiline="true" data-ph="Reply (pasted + Enter)"></div><canvas id="wave" class="wave"></canvas><span class="wavemsg">Transcribing…</span></div><div class="sbtns"><button class="micbtn" id="micbtn" hidden aria-label="Dictate" title="Dictate">${I_MIC}</button><input type="file" id="micfile" accept="audio/*" capture hidden><button class="primary sendbtn" id="sendbtn" aria-label="Send" title="Send">${I_SEND}</button></div></div></div>`;
   $('#back').onclick = () => (location.hash = backHash);
   term = new Terminal({ fontSize: 12.5, fontFamily: 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace', theme: isLight() ? XT_LIGHT : XT_DARK, scrollback: 3000, cursorBlink: false, allowProposedApi: true });
   fit = new FitAddon.FitAddon(); term.loadAddon(fit);
@@ -362,14 +378,49 @@ function openTerm(addr) {
   document.querySelectorAll('.keys [data-k]').forEach((b) => (b.onpointerdown = (e) => { e.preventDefault(); let k = JSON.parse('"' + b.dataset.k.replace(/\\x1b/g, '\\u001b').replace(/\\x03/g, '\\u0003').replace(/\\t/g, '\\t').replace(/\\r/g, '\\r') + '"'); tsend({ t: 'i', d: k }); }));
   $('#kctrl').onpointerdown = (e) => { e.preventDefault(); setCtrl(!ctrl); };
   $('#sendbtn').onclick = sendText;
+  setupReplyBox($('#sendtxt'));
+  setupMic();
+  $('#kpaste').onpointerdown = (e) => { e.preventDefault(); pasteClip(); };
+  $('#kbd').onpointerdown = (e) => { e.preventDefault(); setKbd(!kbdOn()); };
+  setKbd(kbdOn());
   $('#conn').onclick = () => attach();
-  const reflow = () => { const vv = window.visualViewport; const ts = $('#ts'); if (vv && ts) { ts.style.height = vv.height + 'px'; ts.style.top = vv.offsetTop + 'px'; ts.style.bottom = 'auto'; } doFit(); };
-  window.visualViewport && window.visualViewport.addEventListener('resize', reflow);
-  window.visualViewport && window.visualViewport.addEventListener('scroll', reflow);
-  window.addEventListener('resize', reflow); window.addEventListener('orientationchange', () => setTimeout(reflow, 250));
+  // While the on-screen keyboard is up the screen follows the visual viewport; once it is down the inline
+  // size goes, so the screen is full height again. Phones report the viewport in steps, so re-check a few times.
+  const reflow = () => {
+    const vv = window.visualViewport, ts = $('#ts'); if (!ts) return;
+    if (vv && window.innerHeight - vv.height > 60) { ts.style.height = vv.height + 'px'; ts.style.top = vv.offsetTop + 'px'; ts.style.bottom = 'auto'; }
+    else { ts.style.height = ''; ts.style.top = ''; ts.style.bottom = ''; }
+    doFit();
+  };
+  let settleT = [];
+  const settle = () => { reflow(); settleT.forEach(clearTimeout); settleT = [120, 350, 800].map((ms) => setTimeout(reflow, ms)); };
+  window.visualViewport && window.visualViewport.addEventListener('resize', settle);
+  window.visualViewport && window.visualViewport.addEventListener('scroll', settle);
+  window.addEventListener('resize', settle); window.addEventListener('orientationchange', settle);
+  $('#ts').addEventListener('focusout', settle);
+  // ⟳ on this screen: fit to the screen again and re-attach (the agent redraws at the new size).
+  termRefresh = () => { settle(); setTimeout(() => { reflow(); attach(); }, 150); };
+  $('#ts [data-act=reload]').onclick = termRefresh;
   reflow();
   attach();
 }
+// The ⌨ button shows or hides the extra keys row (Esc, Tab, Ctrl…); remembered for every terminal.
+const kbdOn = () => { try { return localStorage.getItem('hm-keys') !== '0'; } catch { return true; } };
+function setKbd(v) {
+  try { localStorage.setItem('hm-keys', v ? '1' : '0'); } catch {}
+  const b = $('#kbd'), k = $('#ts .keys');
+  if (b) b.classList.toggle('on', v);
+  if (k) k.hidden = !v;
+  try { fit && fit.fit(); } catch {}
+}
+// Clipboard reads need a secure context (https or localhost); over plain http on the LAN fall back to a prompt.
+async function pasteClip() {
+  let text = null;
+  try { if (navigator.clipboard && navigator.clipboard.readText) text = await navigator.clipboard.readText(); } catch {}
+  if (text === null) text = prompt('Paste text to send to the terminal');
+  if (text && term) term.paste(text);
+}
+let termRefresh = null;
 function setCtrl(v) { ctrl = v; const b = $('#kctrl'); if (b) b.className = v ? 'on' : ''; }
 function tsend(m) { if (tws && tws.readyState === 1) tws.send(JSON.stringify(m)); }
 function attach() {
@@ -382,9 +433,154 @@ function attach() {
   mine.onclose = () => { if (tws === mine && $('#conn')) $('#conn').className = 'conn on'; };
 }
 async function sendText() {
-  const ta = $('#sendtxt'); const text = ta.value; if (!text.trim()) return;
-  const r = await api('/api/send', { terminal: tAddr, text });
-  if (r.ok) { ta.value = ''; ta.style.height = '44px'; } else toast(r.error || 'Send failed');
+  const ta = $('#sendtxt'), b = $('#sendbtn'); const text = ta.value; if (!text.trim() || b.classList.contains('busy')) return;
+  b.classList.add('busy'); b.disabled = true;
+  let r; try { r = await api('/api/send', { terminal: tAddr, text }); } catch (e) { r = { error: e.message }; }
+  b.classList.remove('busy'); b.disabled = false;
+  if (r.ok) { ta.value = ''; sizeReply(ta); } else toast(r.error || 'Send failed');
 }
-document.addEventListener('input', (e) => { if (e.target.id === 'sendtxt') { e.target.style.height = '44px'; e.target.style.height = Math.min(120, e.target.scrollHeight) + 'px'; } });
+// ---- reply box: a contenteditable (keyboards such as Gboard insert clipboard images only into rich fields) ----
+// It behaves as a plain-text box (value, disabled) for the rest of the code. An image pasted, inserted by the
+// keyboard, dropped or picked with the clip is uploaded (/api/upload) and its server path goes into the text.
+function setupReplyBox(el) {
+  Object.defineProperty(el, 'value', {
+    get: () => el.innerText.replace(/\u00a0/g, ' ').replace(/\n$/, ''),
+    set: (v) => { el.textContent = v; },
+  });
+  Object.defineProperty(el, 'disabled', { get: () => el.contentEditable === 'false', set: (v) => { el.contentEditable = v ? 'false' : 'true'; } });
+  const images = (dt) => [...((dt && dt.files) || [])].filter((f) => /^image\//.test(f.type));
+  el.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const imgs = images(e.clipboardData);
+    if (imgs.length) return imgs.forEach(uploadImage);
+    const t = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+    if (t) document.execCommand('insertText', false, t);
+  });
+  el.addEventListener('drop', (e) => { const imgs = images(e.dataTransfer); if (imgs.length) { e.preventDefault(); imgs.forEach(uploadImage); } });
+  // Anything rich that still lands inside (a keyboard's image, formatted text) is turned back into plain text.
+  el.addEventListener('input', () => {
+    for (const img of el.querySelectorAll('img')) { const src = img.src; img.remove(); if (src) fetch(src).then((r) => r.blob()).then(uploadImage, () => toast('Could not read the image')); }
+    if (el.querySelector('*:not(br):not(div)') || el.querySelector('div div')) { const t = el.value; el.textContent = t; caretEnd(el); }
+    if (!el.innerText.trim() && !el.querySelector('img')) el.innerHTML = '';
+  });
+  $('#attbtn').onclick = () => $('#attfile').click();
+  $('#attfile').onchange = (e) => { const fs = [...(e.target.files || [])]; e.target.value = ''; fs.forEach(uploadImage); };
+}
+function caretEnd(el) { const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+let uploads = 0;
+async function uploadImage(blob) {
+  const b = $('#attbtn'); uploads++; b && b.classList.add('busy');
+  let j;
+  try { const r = await fetch('/api/upload', { method: 'POST', headers: { 'content-type': blob.type || 'image/png' }, body: blob }); j = await r.json().catch(() => ({ error: 'HTTP ' + r.status })); }
+  catch (e) { j = { error: e.message }; }
+  if (--uploads === 0 && b) b.classList.remove('busy');
+  if (j.error || !j.path) return toast(j.error || 'Upload failed');
+  const ta = $('#sendtxt'); if (!ta) return;
+  const v = ta.value, ins = (v && !/\s$/.test(v) ? ' ' : '') + j.path + ' ';
+  if (document.activeElement === ta) document.execCommand('insertText', false, ins);
+  else { ta.value = v + ins; caretEnd(ta); }
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+// The reply box grows up to 120px; once it holds more than one line, Mic and Send stack in a column.
+function sizeReply(ta) {
+  ta.style.height = '38px'; ta.style.height = Math.min(120, ta.scrollHeight + ta.offsetHeight - ta.clientHeight) + 'px';
+  const box = ta.closest('.sendbox'); if (box) box.classList.toggle('multi', ta.scrollHeight > 44);
+}
+// ---- dictation: the mic records, the server transcribes (ASR_PROVIDER), the text lands in the reply box ----
+// Tap = start, tap again = stop. While recording the reply box is disabled and shows a live waveform;
+// while transcribing it shows "Transcribing…". Live recording needs a secure context (https/localhost);
+// over plain http the mic opens the phone's own recorder through a file input instead.
+let micRec = null, micOn = null, micStarting = false, micHttps = 0;
+function micState(st) { // '' | 'rec' | 'busy'
+  const box = $('#ts .sendbox'), ta = $('#sendtxt'), b = $('#micbtn');
+  if (box) { box.classList.toggle('rec', st === 'rec'); box.classList.toggle('busy', st === 'busy'); }
+  if (ta) ta.disabled = Boolean(st);
+  if (b) { b.classList.toggle('rec', st === 'rec'); b.classList.toggle('busy', st === 'busy'); b.title = st === 'rec' ? 'Stop and transcribe' : 'Dictate'; }
+}
+async function setupMic() {
+  const b = $('#micbtn'); if (!b) return;
+  if (micOn === null) { const j = await api('/api/asr'); micOn = j.enabled === true; micHttps = j.https || 0; }
+  if (!micOn || !$('#micbtn')) return;
+  b.hidden = false;
+  const live = Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  $('#micfile').onchange = (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) transcribe(f); };
+  b.onclick = async () => {
+    if (b.classList.contains('busy') || micStarting) return;
+    if (micRec) { micRec.stop(); return; }
+    // Plain http has no getUserMedia: go to the server's https port (its CA is at /ca.crt).
+    if (!live && !window.isSecureContext && micHttps) {
+      const to = `https://${location.hostname}:${micHttps}`;
+      b.classList.add('busy');
+      // fails while this phone does not trust the certificate yet
+      const ok = await fetch(to + '/icon.svg', { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(4000) }).then(() => true, () => false);
+      b.classList.remove('busy');
+      if (ok) { location.href = to + location.pathname + location.hash; return; }
+      if (confirm('Live dictation needs HTTPS, and this phone does not trust the certificate yet.\n\nOK: download the certificate (install it as a CA certificate, then tap the mic again).\nCancel: record with the phone\'s recorder instead.')) { location.href = '/ca.crt'; return; }
+    }
+    if (!live) { $('#micfile').click(); return; }
+    let stream;
+    micStarting = true;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+    catch (e) { toast('Microphone: ' + (e.message || e.name)); return; }
+    finally { micStarting = false; }
+    if (!$('#wave')) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const type = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
+    const rec = new MediaRecorder(stream, type ? { mimeType: type } : {}), parts = [];
+    const stopWave = waveform(stream, $('#wave'));
+    let discard = false;
+    rec.ondataavailable = (e) => e.data && e.data.size && parts.push(e.data);
+    rec.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop()); stopWave();
+      micRec = null; micState('');
+      if (!discard && parts.length) transcribe(new Blob(parts, { type: rec.mimeType || type || 'audio/webm' }));
+    };
+    // Leaving the terminal screen mid-recording drops the recording.
+    rec.abandon = () => { discard = true; try { rec.stop(); } catch {} };
+    micRec = rec; rec.start(250); micState('rec');
+  };
+}
+// Scrolling level bars, newest on the right (like the ChatGPT / Claude composers). Returns a stop function.
+function waveform(stream, cv) {
+  let ctx, raf = 0, last = 0;
+  const levels = [];
+  try {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const an = ctx.createAnalyser(); an.fftSize = 1024;
+    ctx.createMediaStreamSource(stream).connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    const draw = (now) => {
+      raf = requestAnimationFrame(draw);
+      if (!cv || !cv.isConnected) { if (micRec && micRec.abandon) micRec.abandon(); return; }
+      if (now - last < 50) return; last = now;
+      an.getByteTimeDomainData(buf);
+      let sum = 0; for (const v of buf) { const x = (v - 128) / 128; sum += x * x; }
+      levels.push(Math.min(1, Math.sqrt(sum / buf.length) * 4));
+      const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+      if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+      const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+      g.fillStyle = getComputedStyle(cv).color;
+      const step = 4, bw = 2, n = Math.floor(w / step);
+      if (levels.length > n) levels.splice(0, levels.length - n);
+      for (let i = 0; i < levels.length; i++) {
+        const bh = Math.max(2, levels[levels.length - 1 - i] * (h - 8));
+        const x = w - (i + 1) * step;
+        g.beginPath(); g.roundRect ? g.roundRect(x, (h - bh) / 2, bw, bh, 1) : g.rect(x, (h - bh) / 2, bw, bh); g.fill();
+      }
+    };
+    raf = requestAnimationFrame(draw);
+  } catch {}
+  return () => { cancelAnimationFrame(raf); try { ctx && ctx.close(); } catch {} if (cv && cv.isConnected) cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); };
+}
+async function transcribe(blob) {
+  micState('busy');
+  let j;
+  try { const r = await fetch('/api/asr', { method: 'POST', headers: { 'content-type': blob.type || 'audio/webm' }, body: blob }); j = await r.json().catch(() => ({ error: 'HTTP ' + r.status })); }
+  catch (e) { j = { error: e.message }; }
+  micState('');
+  if (j.error) return toast(j.error);
+  const ta = $('#sendtxt'); if (!ta || !j.text) return j.text ? null : toast('Nothing recognized');
+  ta.value = ta.value && !/\s$/.test(ta.value) ? ta.value + ' ' + j.text : ta.value + j.text;
+  ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus();
+}
+document.addEventListener('input', (e) => { if (e.target.id === 'sendtxt') sizeReply(e.target); });
 route();

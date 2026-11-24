@@ -1,6 +1,7 @@
 'use strict';
 // herdr-mobile: watch and drive Herdr terminals/agents from a phone browser.
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -103,7 +104,22 @@ const evConn = conn((m) => {
 });
 async function fetchDoc() { const r = await rpc('doc.get', { name: 'herdr-app' }); doc = r.value; }
 async function refreshTerminals() {
-  try { const r = await rpc('terminal.list', {}); terminals = (r.terminals || r).filter((t) => t.state === 'live'); scheduleRebuild(); } catch (e) { console.error(e.message); }
+  try { const r = await rpc('terminal.list', {}); terminals = (r.terminals || r).filter((t) => t.state === 'live'); updateSeen(); scheduleRebuild(); } catch (e) { console.error(e.message); }
+}
+
+// ---------- seen: "done" = finished while nobody looked; it becomes "idle" once someone looks (as the desktop) ----------
+// Looking = a viewer attached to the terminal (phone terminal screen or a wide-layout card).
+// seen.json keeps the done terminals already looked at; an entry goes when the agent leaves "done".
+const SEEN_FILE = path.join(CONF, 'seen.json');
+const watching = new Map(); // address -> open attach count
+let seen = new Set();
+try { seen = new Set(JSON.parse(fs.readFileSync(SEEN_FILE, 'utf8'))); } catch {}
+const rawState = (t) => (t.status && t.status.state) || '';
+function saveSeen() { try { fs.writeFileSync(SEEN_FILE + '.tmp', JSON.stringify([...seen])); fs.renameSync(SEEN_FILE + '.tmp', SEEN_FILE); } catch (e) { console.error('seen:', e.message); } }
+function updateSeen() {
+  const next = new Set();
+  for (const t of terminals) if (rawState(t) === 'done' && (seen.has(t.address) || watching.get(t.address) > 0)) next.add(t.address);
+  if (next.size !== seen.size || [...next].some((a) => !seen.has(a))) { seen = next; saveSeen(); }
 }
 
 // ---------- projects ----------
@@ -207,15 +223,17 @@ function buildState() {
     const tabs = (s.tabs || []).map((tb, i) => {
       let tstatus = 'idle';
       const terms = walk(tb.root, []).map((a) => tmap.get(a)).filter(Boolean).map((t) => {
-        const st = (t.status && t.status.state) || '';
+        let st = rawState(t);
+        if (st === 'done' && seen.has(t.address)) st = 'idle';
         tstatus = worst(tstatus, st);
         any = true;
         return { address: t.address, title: t.title || '', program: (t.foreground && t.foreground.name) || (t.argv && t.argv[0]) || '', app: (t.status && t.status.app) || '', status: st || 'idle', msg: (t.status && t.status.msg) || '', cwd: t.cwd, cols: t.cols, rows: t.rows };
       });
       status = worst(status, tstatus);
-      return { id: tb.id, name: tb.name || '', index: i + 1, status: tstatus, terminals: terms, root: strip(tb.root) };
+      const unread = terms.filter((x) => x.status === 'done').length; // finished while nobody looked
+      return { id: tb.id, name: tb.name || '', index: i + 1, status: tstatus, unread, terminals: terms, root: strip(tb.root) };
     });
-    return { id: s.id, name: s.name, folder: s.folder, status, tabs, _cwds: tabs.flatMap((t) => t.terminals.map((x) => x.cwd)) };
+    return { id: s.id, name: s.name, folder: s.folder, status, unread: tabs.reduce((n, t) => n + t.unread, 0), tabs, _cwds: tabs.flatMap((t) => t.terminals.map((x) => x.cwd)) };
   });
   const deepest = (p) => projects.filter((pr) => inside(p, pr.path)).sort((a, b) => b.path.length - a.path.length)[0];
   const owner = new Map(); // space id -> project path
@@ -228,7 +246,9 @@ function buildState() {
     const sp = spaces.filter((s) => owner.get(s.id) === p.path);
     let status = ''; for (const s of sp) status = worst(status, s.status);
     const g = gitInfo.get(p.path);
-    return { idx: i, name: p.name, path: p.path, git: g || null, open: sp.length > 0, status: sp.length ? status : '', spaces: sp.map((s) => s.id) };
+    const working = sp.some((s) => s.tabs.some((tb) => tb.terminals.some((x) => x.status === 'working')));
+    const unread = sp.reduce((n, s) => n + s.unread, 0);
+    return { idx: i, name: p.name, path: p.path, git: g || null, open: sp.length > 0, status: sp.length ? status : '', working, unread, spaces: sp.map((s) => s.id) };
   });
   for (const s of spaces) delete s._cwds;
   let colors = {}; try { colors = conf.wb().colors || {}; } catch {}
@@ -270,6 +290,7 @@ async function adopt(address, spaceId, tabId, folder, tabName) {
 // ---------- workbench: tasks, pull requests, AI (desktop wb-tasks / wb-prs / wb-ai) ----------
 const conf = require('./lib/conf').make(CONF);
 const ai = require('./lib/ai');
+const asr = require('./lib/asr');
 const tasksApi = require('./lib/tasks').make(conf);
 const prsApi = require('./lib/prs').make(conf, ai, tasksApi);
 const repoCache = new Map(); // project path -> repo, for a minute
@@ -432,6 +453,37 @@ async function handleApi(req, res, url) {
     return send(res, 200, { path: dir, home: HOME, shown: dir === HOME ? '~' : dir.startsWith(HOME + '/') ? '~' + dir.slice(HOME.length) : dir, dirs, git,
       known: projects.some((x) => x.path === dir) });
   }
+  if (p === '/api/upload') {
+    // An image for an agent (pasted or picked on the phone): the raw file is the body. It is saved under
+    // ~/.cache/herdr-mobile/uploads and the answer is its path, which goes into the reply text
+    // (Claude Code and Codex read an image from a path in the prompt). Files older than 7 days are removed.
+    if (req.method !== 'POST') return send(res, 405, { error: 'POST required' });
+    const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/heic': 'heic', 'image/heif': 'heif', 'image/bmp': 'bmp' }[type];
+    if (!ext) return send(res, 415, { error: 'Not an image: ' + (type || 'unknown type') });
+    const chunks = []; let size = 0, big = false;
+    await new Promise((ok) => { req.on('data', (d) => { size += d.length; if (size > 30e6) big = true; else chunks.push(d); }); req.on('end', ok); req.on('error', ok); });
+    if (big) return send(res, 413, { error: 'Image too large (30 MB max)' });
+    if (!size) return send(res, 400, { error: 'Empty image' });
+    const dir = path.join(HOME, '.cache', 'herdr-mobile', 'uploads');
+    fs.mkdirSync(dir, { recursive: true });
+    try { const old = Date.now() - 7 * 864e5; for (const f of fs.readdirSync(dir)) { const fp = path.join(dir, f); if (fs.statSync(fp).mtimeMs < old) fs.unlinkSync(fp); } } catch {}
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const file = path.join(dir, `img-${stamp}-${crypto.randomBytes(3).toString('hex')}.${ext}`);
+    fs.writeFileSync(file, Buffer.concat(chunks), { mode: 0o600 });
+    return send(res, 200, { path: file });
+  }
+  if (p === '/api/asr') {
+    // Dictation: the raw recording is the body (Content-Type = its audio type); answers { text }.
+    if (req.method === 'GET') return send(res, 200, { enabled: asr.enabled(), https: httpsServer ? HTTPS_PORT : 0 });
+    if (req.method !== 'POST') return send(res, 405, { error: 'POST required' });
+    const chunks = []; let size = 0, big = false;
+    await new Promise((ok) => { req.on('data', (d) => { size += d.length; if (size > 20e6) big = true; else chunks.push(d); }); req.on('end', ok); req.on('error', ok); });
+    if (big) return send(res, 413, { error: 'Recording too long' });
+    if (!size) return send(res, 400, { error: 'Empty recording' });
+    try { return send(res, 200, { text: await asr.transcribe(Buffer.concat(chunks), req.headers['content-type']) }); }
+    catch (e) { return send(res, 502, { error: e.message }); }
+  }
   if (req.method === 'GET') { const g = await workbenchGet(p, url.searchParams); if (g) return send(res, g.code || (g.error ? 500 : 200), g); }
   if (req.method !== 'POST') return send(res, 405, { error: 'POST required' });
   const body = await readBody(req);
@@ -533,9 +585,10 @@ async function handleApi(req, res, url) {
   send(res, 404, { error: 'not found' });
 }
 
-const server = http.createServer(async (req, res) => {
+async function onRequest(req, res) {
   const url = new URL(req.url, 'http://x');
   try {
+    if (url.pathname === '/ca.crt' && tls) { res.writeHead(200, { 'content-type': 'application/x-x509-ca-cert', 'content-disposition': 'attachment; filename="herdr-mobile-ca.crt"' }); return res.end(tls.ca); }
     if (OPEN_PATHS.has(url.pathname)) return serveFile(res, path.join(PUB, url.pathname));
     if (!authed(req, url)) return send(res, 401, { error: 'unauthorized' });
     if (url.searchParams.has('token')) {
@@ -554,18 +607,59 @@ const server = http.createServer(async (req, res) => {
     if (!file.startsWith(PUB + path.sep)) return send(res, 403, {});
     serveFile(res, file);
   } catch (e) { console.error(e); send(res, 500, { error: e.message }); }
-});
+}
+const server = http.createServer(onRequest);
+
+// ---------- https: browsers give the microphone (getUserMedia) only to secure pages ----------
+// A local CA (tls/ca.pem, install /ca.crt on the phone once) signs a server certificate for this
+// machine's names and IPs; the certificate is remade when an IP it lacks shows up.
+const HTTPS_PORT = +(process.env.HTTPS_PORT ?? 7682);
+const TLS_DIR = path.join(CONF, 'tls');
+function ensureTls() {
+  const names = ['localhost', os.hostname(), MACHINE].filter((v, i, a) => v && a.indexOf(v) === i);
+  const ips = ['127.0.0.1', ...Object.values(os.networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => i.address)];
+  const f = (n) => path.join(TLS_DIR, n);
+  const ossl = (args) => require('child_process').execFileSync('openssl', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  fs.mkdirSync(TLS_DIR, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(f('ca.pem')) || !fs.existsSync(f('ca.key'))) {
+    ossl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', f('ca.key'), '-out', f('ca.pem'), '-days', '3650', '-subj', '/CN=herdr-mobile local CA',
+      '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign']);
+  }
+  const want = [...names.map((n) => 'DNS:' + n), ...ips.map((i) => 'IP:' + i)];
+  let have = []; try { have = fs.readFileSync(f('san.txt'), 'utf8').split(','); } catch {}
+  if (!fs.existsSync(f('cert.pem')) || want.some((w) => !have.includes(w))) {
+    const san = [...new Set([...have.filter(Boolean), ...want])].join(',');
+    fs.writeFileSync(f('ext.cnf'), `subjectAltName=${san}
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+`);
+    ossl(['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', f('key.pem'), '-out', f('cert.csr'), '-subj', '/CN=' + os.hostname()]);
+    // 825 days: the longest server certificate iOS accepts
+    ossl(['x509', '-req', '-in', f('cert.csr'), '-CA', f('ca.pem'), '-CAkey', f('ca.key'), '-CAcreateserial', '-out', f('cert.pem'), '-days', '825', '-extfile', f('ext.cnf')]);
+    fs.writeFileSync(f('san.txt'), san);
+  }
+  for (const n of ['ca.key', 'key.pem']) fs.chmodSync(f(n), 0o600);
+  return { key: fs.readFileSync(f('key.pem')), cert: fs.readFileSync(f('cert.pem')), ca: fs.readFileSync(f('ca.pem')) };
+}
+let tls = null, httpsServer = null;
+if (HTTPS_PORT > 0) {
+  try { tls = ensureTls(); httpsServer = https.createServer({ key: tls.key, cert: tls.cert }, onRequest); }
+  catch (e) { console.error('https disabled:', e.message); }
+}
 
 // ---------- websockets ----------
 const wssEvents = new WebSocketServer({ noServer: true });
 const wssAttach = new WebSocketServer({ noServer: true });
-server.on('upgrade', (req, socket, head) => {
+function onUpgrade(req, socket, head) {
   const url = new URL(req.url, 'http://x');
   if (!authed(req, url)) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return socket.destroy(); }
   if (url.pathname === '/events') wssEvents.handleUpgrade(req, socket, head, (ws) => onEvents(ws));
   else if (url.pathname === '/attach') wssAttach.handleUpgrade(req, socket, head, (ws) => onAttach(ws, url));
   else { socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'); socket.destroy(); }
-});
+}
+server.on('upgrade', onUpgrade);
+if (httpsServer) httpsServer.on('upgrade', onUpgrade);
 function onEvents(ws) {
   clients.add(ws);
   ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; });
@@ -589,6 +683,10 @@ function onAttach(ws, url) {
   try { p = pty.spawn(HC, args, { name: 'xterm-256color', cols, rows, cwd: HOME, env: process.env }); }
   catch (e) { return ws.close(1011, 'spawn failed'); }
   ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; });
+  watching.set(t, (watching.get(t) || 0) + 1);
+  if (!seen.has(t) && terminals.some((x) => x.address === t && rawState(x) === 'done')) { updateSeen(); scheduleRebuild(); }
+  let gone = false;
+  const unwatch = () => { if (gone) return; gone = true; const n = (watching.get(t) || 1) - 1; if (n > 0) watching.set(t, n); else watching.delete(t); };
   p.onData((d) => { if (ws.readyState === 1) ws.send(d); });
   p.onExit(() => { try { ws.close(1000, 'detached'); } catch {} });
   ws.on('message', (data, isBinary) => {
@@ -596,7 +694,7 @@ function onAttach(ws, url) {
     if (m.t === 'i' && typeof m.d === 'string') p.write(m.d);
     else if (m.t === 'r') { try { p.resize(Math.max(20, Math.min(400, m.cols | 0)), Math.max(5, Math.min(200, m.rows | 0))); } catch {} }
   });
-  const kill = () => { try { p.kill(); } catch {} };
+  const kill = () => { unwatch(); try { p.kill(); } catch {} };
   ws.on('close', kill); ws.on('error', kill);
 }
 
@@ -604,6 +702,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`herdr-mobile listening on :${PORT}`);
   for (const ifs of Object.values(os.networkInterfaces())) for (const i of ifs || []) if (i.family === 'IPv4' && !i.internal) console.log(`open: http://${i.address}:${PORT}/?token=${TOKEN}`);
 });
+if (httpsServer) httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => console.log(`https on :${HTTPS_PORT} (install the CA once: http://<ip>:${PORT}/ca.crt)`));
 loadProjects();
 fs.watchFile(PROJECTS_FILE, { interval: 2000 }, loadProjects);
 reqConn.start();

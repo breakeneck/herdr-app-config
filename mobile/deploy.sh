@@ -70,6 +70,8 @@ After=network-online.target
 WorkingDirectory=%h/herdr-mobile
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PORT=7681
+# Optional settings and keys (ASR_PROVIDER, ASR_API_KEY, ASR_MODEL, ASR_LANGUAGE, ASR_URL for dictation); kept across deploys.
+EnvironmentFile=-%h/.config/herdr-mobile/env
 ExecStart=%h/.local/bin/node server.js
 Restart=always
 RestartSec=2
