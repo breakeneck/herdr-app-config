@@ -157,7 +157,8 @@ export default class RemoteProjects extends View {
     if (folder.startsWith("~")) {
       return notify({ title: this.title, body: `${p.machine} isn't reachable yet`, level: "warning" });
     }
-    run("space.new", { name: p.name, folder, machine: p.machine ?? "" });
+    // A new project space starts with Claude Code, not a bare shell (the shell stays when it exits).
+    run("space.new", { name: p.name, folder, machine: p.machine ?? "", argv: ["claude"] });
   }
 
   add(cx) {
