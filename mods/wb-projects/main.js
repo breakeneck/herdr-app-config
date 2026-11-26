@@ -138,11 +138,16 @@ export default class RemoteProjects extends View {
     const inside = (f, d) => f && (f === d || f.startsWith(d + "/"));
     const dirs = this.projects.filter((q) => (q.machine ?? null) === machine).map((q) => this.abs(machine, q.path));
     const mine = (f) => inside(f, dir) && !dirs.some((d) => d.length > dir.length && inside(f, d));
+    // Where a space is now is its terminals' live folders; `folder` is only where it was
+    // made (a space started in ~ and cd'd into a repo still says ~), so it counts only for
+    // a space with no terminal folder known yet.
     const here = spaces().filter((s) => (s.machine ?? null) === machine);
-    return here.find((s) => mine(s.folder)) ?? here.find((s) => {
+    const cwds = (s) => {
       const tabs = new Set(s.tabs.map((t) => t.id));
-      return ps.some((x) => tabs.has(x.tab) && mine(x.cwd));
-    });
+      return ps.filter((x) => tabs.has(x.tab) && x.cwd).map((x) => x.cwd.replace(/\/+$/, ""));
+    };
+    return here.find((s) => { const c = cwds(s); return c.length ? mine(c[0]) : mine(s.folder); })
+      ?? here.find((s) => cwds(s).some(mine));
   }
 
   open(p) {
