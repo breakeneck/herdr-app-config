@@ -26,12 +26,52 @@ const enabled = () => { try { return Boolean(cfg().key); } catch { return false;
 const FORMATS = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'mp4', 'audio/x-m4a': 'm4a', 'audio/m4a': 'm4a', 'audio/aac': 'aac',
   'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/flac': 'flac', 'audio/amr': 'amr', 'video/webm': 'webm', 'video/mp4': 'mp4' };
 
+// Browser recordings are often malformed for the ASR APIs: MediaRecorder webm has no duration and its
+// timestamps can start late, Safari's fragmented mp4 needs a seekable file. So every recording is
+// re-encoded with ffmpeg to plain 16 kHz mono mp3 (if ffmpeg fails, the original is sent).
+const fs = require('fs'), os = require('os'), path = require('path');
+const { execFile } = require('child_process');
+const run = (cmd, args) => new Promise((ok, no) => execFile(cmd, args, { timeout: 60000, maxBuffer: 1e6 }, (e, out, err) => (e ? no(new Error(String(err || e.message).slice(-300))) : ok(String(out)))));
+async function normalize(buf, fmt) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-asr-'));
+  const src = path.join(dir, 'in.' + fmt), dst = path.join(dir, 'out.mp3');
+  try {
+    fs.writeFileSync(src, buf);
+    await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', src, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '48k', dst]);
+    const secs = parseFloat(await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', dst]));
+    return { buf: fs.readFileSync(dst), secs: Number.isFinite(secs) ? secs : null };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+// The last few recordings that came back empty or failed are kept for a look
+// (~/.config/herdr-mobile/asr-failed/, newest 5).
+const FAILED = path.join(process.env.HERDR_MOBILE_HOME || path.join(os.homedir(), '.config', 'herdr-mobile'), 'asr-failed');
+function keepFailed(buf, fmt) {
+  try {
+    fs.mkdirSync(FAILED, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(FAILED, `${new Date().toISOString().replace(/[:.]/g, '-')}.${fmt}`), buf, { mode: 0o600 });
+    const old = fs.readdirSync(FAILED).sort().slice(0, -5);
+    for (const f of old) fs.rmSync(path.join(FAILED, f), { force: true });
+  } catch {}
+}
+
 async function transcribe(buf, mime) {
   const c = cfg();
   if (!c.key) throw new Error('Dictation is not configured (ASR_API_KEY)');
   const type = String(mime || 'audio/webm').split(';')[0].trim().toLowerCase();
   const fmt = FORMATS[type] || type.split('/')[1] || 'webm';
-  return String(await c.p.run(c, buf, type, fmt) || '').trim();
+  const t0 = Date.now();
+  let audio = { buf, type, fmt, secs: null }, note = '';
+  try { const n = await normalize(buf, fmt); audio = { buf: n.buf, type: 'audio/mpeg', fmt: 'mp3', secs: n.secs }; }
+  catch (e) { note = ` (ffmpeg failed, sent as is: ${e.message.trim()})`; }
+  const log = (what) => console.log(`asr: ${type} ${buf.length} B, ${audio.secs == null ? '?' : audio.secs.toFixed(1)} s -> ${what}, ${Date.now() - t0} ms${note}`);
+  if (audio.secs != null && audio.secs < 0.3) { log('too short'); keepFailed(buf, fmt); throw new Error('Recording is empty (no audio reached the server)'); }
+  let text;
+  try { text = String(await c.p.run(c, audio.buf, audio.type, audio.fmt) || '').trim(); }
+  catch (e) { log('error: ' + e.message); keepFailed(buf, fmt); throw e; }
+  log(text ? `${text.length} chars` : 'empty');
+  if (!text) keepFailed(buf, fmt);
+  return text;
 }
 
 async function call(url, init) {
@@ -43,13 +83,22 @@ async function call(url, init) {
   return d;
 }
 
+let chunking = true;
 async function openai(c, buf, type, fmt) {
   const form = new FormData();
   form.append('model', c.model);
   if (c.language) form.append('language', c.language);
+  // Long recordings: let the server cut them at pauses (VAD) instead of returning nothing or a cut text.
+  if (chunking) form.append('chunking_strategy', 'auto');
   form.append('file', new Blob([buf], { type }), `speech.${fmt}`);
-  const d = await call(c.url, { method: 'POST', headers: { authorization: `Bearer ${c.key}` }, body: form });
-  return d.text;
+  try {
+    const d = await call(c.url, { method: 'POST', headers: { authorization: `Bearer ${c.key}` }, body: form });
+    return d.text;
+  } catch (e) {
+    // a model or endpoint without chunking_strategy: drop it from now on
+    if (chunking && /chunking/i.test(e.message)) { chunking = false; return openai(c, buf, type, fmt); }
+    throw e;
+  }
 }
 
 async function qwen(c, buf, type, fmt) {

@@ -530,7 +530,12 @@ async function setupMic() {
   b.hidden = false;
   const live = Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
   $('#micfile').onchange = (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) transcribe(f); };
-  b.onclick = async () => {
+  // Pointerdown, not click: on a phone the first tap would otherwise blur the reply box, the keyboard
+  // goes down, the screen reflows and the click lands beside the button (the "first tap does nothing").
+  // preventDefault keeps the focus where it is. Click stays for keyboards (Enter/Space give detail 0).
+  b.onpointerdown = (e) => { if (e.button) return; e.preventDefault(); toggle(); };
+  b.onclick = (e) => { if (e.detail === 0) toggle(); };
+  const toggle = async () => {
     if (b.classList.contains('busy') || micStarting) return;
     if (micRec) { micRec.stop(); return; }
     // Plain http has no getUserMedia: go to the server's https port (its CA is at /ca.crt).
@@ -545,10 +550,10 @@ async function setupMic() {
     }
     if (!live) { $('#micfile').click(); return; }
     let stream;
-    micStarting = true;
+    micStarting = true; b.classList.add('busy'); // opening the mic can take a second on a fresh page
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
     catch (e) { toast('Microphone: ' + (e.message || e.name)); return; }
-    finally { micStarting = false; }
+    finally { micStarting = false; b.classList.remove('busy'); }
     if (!$('#wave')) { stream.getTracks().forEach((t) => t.stop()); return; }
     const type = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
     const rec = new MediaRecorder(stream, type ? { mimeType: type } : {}), parts = [];
