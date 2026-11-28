@@ -357,7 +357,7 @@ function openTerm(addr) {
   $('#app').innerHTML = `<div class="termscreen" id="ts"><header class="bar"><button class="icon" id="back">‹</button><h1 id="thead"></h1><span id="tdot"></span><button class="icon" id="kbd" aria-label="Keyboard" title="Keyboard">${I_KBD}</button><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>
   <div class="conn" id="conn">Disconnected. Tap to reconnect.</div>
   <div id="xt"></div>
-  <div class="keys"><button data-k="\x1b">Esc</button><button data-k="\t">Tab</button><button id="kctrl">Ctrl</button><button data-k="\x03">^C</button><button id="kpaste">Paste</button><button data-k="\r">Enter</button></div>
+  <div class="keys"><button data-k="esc">Esc</button><button data-k="tab">Tab</button><button id="kctrl">Ctrl</button><button data-k="ctrlc">^C</button><button id="kpaste">Paste</button><button data-k="enter">Enter</button></div>
   <div class="sendbox"><button class="micbtn attbtn" id="attbtn" aria-label="Attach image" title="Attach image">${I_CLIP}</button><input type="file" id="attfile" accept="image/*" multiple hidden><div class="sendwrap"><div id="sendtxt" class="ta" contenteditable="true" role="textbox" aria-multiline="true" data-ph="Reply (pasted + Enter)"></div><canvas id="wave" class="wave"></canvas><span class="wavemsg">Transcribing…</span></div><div class="sbtns"><button class="micbtn" id="micbtn" hidden aria-label="Dictate" title="Dictate">${I_MIC}</button><input type="file" id="micfile" accept="audio/*" capture hidden><button class="primary sendbtn" id="sendbtn" aria-label="Send" title="Send">${I_SEND}</button></div></div></div>`;
   termHead();
   $('#back').onclick = () => (location.hash = backHash);
@@ -388,7 +388,7 @@ function openTerm(addr) {
     tsend({ t: 'i', d });
   });
   term.onResize(({ cols, rows }) => tsend({ t: 'r', cols, rows }));
-  document.querySelectorAll('.keys [data-k]').forEach((b) => (b.onpointerdown = (e) => { e.preventDefault(); let k = JSON.parse('"' + b.dataset.k.replace(/\\x1b/g, '\\u001b').replace(/\\x03/g, '\\u0003').replace(/\\t/g, '\\t').replace(/\\r/g, '\\r') + '"'); tsend({ t: 'i', d: k }); }));
+  document.querySelectorAll('.keys [data-k]').forEach((b) => (b.onpointerdown = (e) => { e.preventDefault(); tsend({ t: 'i', d: KEYS[b.dataset.k] }); }));
   $('#kctrl').onpointerdown = (e) => { e.preventDefault(); setCtrl(!ctrl); };
   $('#sendbtn').onclick = sendText;
   setupReplyBox($('#sendtxt'));
@@ -435,6 +435,8 @@ async function pasteClip() {
   if (text && term) term.paste(text);
 }
 let termRefresh = null;
+// The key row's bytes (by name: a raw ESC in an attribute broke JSON.parse, so no key was ever sent).
+const KEYS = { esc: '\x1b', tab: '\t', ctrlc: '\x03', enter: '\r' };
 function setCtrl(v) { ctrl = v; const b = $('#kctrl'); if (b) b.className = v ? 'on' : ''; }
 function tsend(m) { if (tws && tws.readyState === 1) tws.send(JSON.stringify(m)); }
 function attach() {
