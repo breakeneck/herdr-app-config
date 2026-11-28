@@ -1,0 +1,11 @@
+{
+  "programs": {
+    "claude-fable": {
+      "name": "Claude Code · Fable",
+      "icon": "icons/claude.svg",
+      "tint": false,
+      "tile": "#f0a020",
+      "run": ["claude", "--model", "fable"]
+    }
+  }
+}

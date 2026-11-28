@@ -139,7 +139,7 @@
                 "pane": {
                   "header": {
                     "content": {
-                      "mod": "pane"
+                      "mod": "wb-pane"
                     },
                     "reveal": "always",
                     "height": 30,

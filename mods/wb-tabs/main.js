@@ -1,6 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, exec, appHome, readTextFile } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, setShared, layout, settings, exec, appHome, readTextFile, focused, notify } from "herdr";
+import { modelOf, family, modelColors } from "./model.js";
 // Soft dependency: is mods/<name>/ installed? Cached per name, re-read at most once a minute (assumed present until the first read answers).
 const _soft = {};
 function installed(name, fresh) {
@@ -52,6 +53,7 @@ const keyOf = (sp, ps) => JSON.stringify([sp?.machine ?? null, place(sp, ps)]);
 export default class Tabs extends View {
   init(_props, cx) {
     this.pressed = null;
+    this.usageOn = {}; // terminal address -> /usage panel open there (the Usage button's second click closes it)
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
     this.git = {}; // keyOf -> { branch, ahead, behind }, null: not a repo
     this.checked = {}; // keyOf -> when it was last asked
@@ -138,11 +140,15 @@ export default class Tabs extends View {
     if (sid && JSON.parse(key)[1] && switched > (this.checked[key] ?? 0)) this.ask(key, cx);
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
+    const mc = modelColors(settings().dark);
     const item = (c, i) => {
-      const program = panes().find(p => p.tab === c.id && p.program?.agent)?.program ?? panes().find(p => p.tab === c.id)?.program;
+      const agentPane = panes().find(p => p.tab === c.id && p.program?.agent);
+      const program = agentPane?.program ?? panes().find(p => p.tab === c.id)?.program;
+      // A tab working on Fable: amber outline and a Fable tag, so it's clear which model the tab talks to.
+      const fable = panes().some(p => p.tab === c.id && p.terminal && family(modelOf(p.terminal, p.app)) === "fable");
       const name = /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name;
       return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
-        .border(1).border_color(c.active ? t.border : t.chrome).bg(c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)
+        .border(1).border_color(fable ? mc.fable : c.active ? t.border : t.chrome).bg(c.active ? (fable ? mc.fable + "26" : t.raised) : t.chrome).text_color(c.active ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover))
         .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
         .on_mouse_up("left", () => {
@@ -155,6 +161,7 @@ export default class Tabs extends View {
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
+        .when(fable && !/fable/i.test(name), el => el.child(div().flex_none().px(5).h(15).flex().items_center().rounded(4).bg(mc.fable).text_size(10).font_semibold().text_color("#1a1205").child("Fable")))
         .when(c.status === "working", el => el.child(svg("mods/wb-tabs/icons/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
         .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/wb-tabs/icons/close.svg").size(12))));
@@ -191,6 +198,30 @@ export default class Tabs extends View {
       .tooltip(editing ? "Done: stop moving blocks" : "Edit layout: drag blocks by their title to move them")
       .on_click(() => { setShared("wb.layout.drag", null); setShared("wb.layout.edit", !editing); })
       .child(svg("mods/wb-tabs/icons/square-pen.svg").size(14)).child(editing ? "Done" : "Edit layout");
+    // Usage: Claude Code's /usage panel in the focused Claude terminal (as the mobile's Usage key);
+    // a second click closes it with Esc. Shown only while a Claude terminal has the focus.
+    const fo = focused(), fp = panes().find(p => p.pane === fo?.pane);
+    const usageAt = fo?.terminal && modelOf(fo.terminal, fp?.app ?? fo.app) ? fo.terminal : null;
+    const usageOpen = Boolean(usageAt && this.usageOn[usageAt]);
+    const usageButton = h_flex().id("usage").h(26).px(8).flex_none().items_center().rounded(6).text_size(12).font_semibold()
+      .border(1).border_color(t.accent).bg(usageOpen ? t.accent : t.chrome).text_color(usageOpen ? t.accent_foreground : t.accent)
+      .hover(s => s.bg(usageOpen ? t.accent : t.hover)).on_mouse_down("left", stop)
+      .tooltip(usageOpen ? "Close Claude's usage panel (Esc)" : "Claude usage: /usage in the focused terminal")
+      .on_click((_e, cx) => {
+        const addr = usageAt, open = this.usageOn[addr];
+        this.usageOn[addr] = !open; cx.notify();
+        cx.spawn(async (cx) => {
+          try {
+            // Typed key by key: a pasted "/usage" (hc send) reaches Claude as a prompt, not a command.
+            for (const keys of open ? [["esc"]] : [["/", "u", "s", "a", "g", "e"], ["enter"]]) {
+              const r = await exec("hc", ["keys", addr, ...keys]);
+              if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc exited ${r.code}`);
+            }
+          } catch (e) { this.usageOn[addr] = open; notify({ title: "Usage", body: String(e.message ?? e), level: "error" }); }
+          cx.notify();
+        });
+        run("pane.focus", { terminal: addr });
+      }).child("Usage");
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next") })
@@ -207,6 +238,7 @@ export default class Tabs extends View {
                   div().text_size(11).text_color(t.dim).child(`${g.ahead ? `↑${g.ahead}` : ""}${g.behind ? ` ↓${g.behind}` : ""}`))),
             ))
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
+      .when(Boolean(usageAt), el => el.child(usageButton))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .children(PANELS.flatMap(([mod, label, icon]) => {
         const block = body?.children?.find((c) => c.content?.mod === mod);
