@@ -344,3 +344,8 @@ button.fablebtn{border-color:var(--fable);color:var(--fable)}
 /* Usage key: first in the row, outlined in the accent; filled while /usage is open */
 .keys #kusage{border-color:var(--accent);color:var(--accent);font-weight:600}
 .keys #kusage.on{background:var(--accent);color:var(--on-accent)}
+/* While dictating, Send means "stop, transcribe and send": the plane turns to point straight up and the button pulses */
+.sendbtn .ico{transition:transform .35s cubic-bezier(.3,1.4,.5,1)}
+.sendbox.rec .sendbtn .ico{transform:rotate(-45deg)}
+.sendbox.rec .sendbtn:not(.busy){animation:sendpulse 1.2s ease-in-out infinite}
+@keyframes sendpulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 60%,transparent);filter:brightness(1)}50%{box-shadow:0 0 0 6px color-mix(in srgb,var(--accent) 0%,transparent);filter:brightness(1.25)}}
