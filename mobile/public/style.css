@@ -341,3 +341,6 @@ button.fablebtn{border-color:var(--fable);color:var(--fable)}
 /* Send tapped while dictating: stop, transcribe, send; everything else waits */
 .termscreen.sending .keys button,.termscreen.sending #micbtn,.termscreen.sending #attbtn{pointer-events:none;opacity:.4}
 .termscreen.sending .micbtn.rec,.termscreen.sending .micbtn.busy{animation:none}
+/* Usage key: first in the row, outlined in the accent; filled while /usage is open */
+.keys #kusage{border-color:var(--accent);color:var(--accent);font-weight:600}
+.keys #kusage.on{background:var(--accent);color:var(--on-accent)}
