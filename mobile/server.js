@@ -216,6 +216,27 @@ function strip(n) {
   if (n.type === 'block') { const c = n.content || {}; return { t: c.terminal || null, mod: c.mod || null, w }; }
   return { type: n.type, w, children: (n.children || []).map(strip).filter(Boolean) };
 }
+// Which Claude model a terminal runs: `--model X` on its claude command line, the herdr.model label
+// (set by /api/new), else Claude Code's own default from its settings.json.
+let claudeDefault = null;
+function claudeDefaultModel() {
+  if (claudeDefault !== null) return claudeDefault;
+  claudeDefault = '';
+  for (const d of [process.env.CLAUDE_CONFIG_DIR, path.join(HOME, '.claude-home'), path.join(HOME, '.claude')].filter(Boolean)) {
+    try { const m = JSON.parse(fs.readFileSync(path.join(d, 'settings.json'), 'utf8')).model; if (m) { claudeDefault = String(m); break; } } catch {}
+  }
+  return claudeDefault;
+}
+function modelOf(t) {
+  const fg = (t.foreground && t.foreground.argv) || [];
+  const claude = (t.status && t.status.app) === 'claude-code' || fg.some((a) => /(^|\/)claude$/.test(a));
+  if (!claude) return '';
+  for (let i = 0; i < fg.length; i++) {
+    if (fg[i] === '--model' && fg[i + 1]) return fg[i + 1];
+    if (fg[i].startsWith('--model=')) return fg[i].slice(8);
+  }
+  return (t.labels && t.labels['herdr.model']) || claudeDefaultModel();
+}
 function buildState() {
   const tmap = new Map(terminals.map((t) => [t.address, t]));
   const spaces = ((doc && doc.spaces) || []).map((s) => {
@@ -227,7 +248,7 @@ function buildState() {
         if (st === 'done' && seen.has(t.address)) st = 'idle';
         tstatus = worst(tstatus, st);
         any = true;
-        return { address: t.address, title: t.title || '', program: (t.foreground && t.foreground.name) || (t.argv && t.argv[0]) || '', app: (t.status && t.status.app) || '', status: st || 'idle', msg: (t.status && t.status.msg) || '', cwd: t.cwd, cols: t.cols, rows: t.rows };
+        return { address: t.address, title: t.title || '', program: (t.foreground && t.foreground.name) || (t.argv && t.argv[0]) || '', app: (t.status && t.status.app) || '', model: modelOf(t), status: st || 'idle', msg: (t.status && t.status.msg) || '', cwd: t.cwd, cols: t.cols, rows: t.rows };
       });
       status = worst(status, tstatus);
       const unread = terms.filter((x) => x.status === 'done').length; // finished while nobody looked
@@ -512,13 +533,15 @@ async function handleApi(req, res, url) {
     const spaceId = space || 'sp' + rid(), tabId = 'tb' + rid();
     const args = ['run', '--bg', '--keep', '--no-parent', '--cwd', cwd, '--label', 'herdr.space=' + spaceId, '--label', 'herdr.tab=' + tabId, '--json'];
     // Like the desktop's launcher: the agent in the interactive shell, which stays open after it exits.
-    if (body.kind === 'claude') args.push('--', 'bash', '-ic', 'claude; exec bash -i');
+    // fable: Claude Code on the Fable model; the label marks it even before claude shows in the foreground.
+    if (body.kind === 'fable') args.push('--label', 'herdr.model=fable', '--', 'bash', '-ic', 'claude --model fable; exec bash -i');
+    else if (body.kind === 'claude') args.push('--', 'bash', '-ic', 'claude; exec bash -i');
     const r = await run(HC, args);
     if (!r.ok) return send(res, 500, { error: (r.stderr || r.stdout).trim() });
     let address = null; try { address = JSON.parse(r.stdout).address; } catch {}
     // The desktop app adopts labelled terminals into its document, but only while it runs: write the tab ourselves.
     if (address) {
-      try { await adopt(address, spaceId, tabId, cwd, body.kind === 'claude' ? 'Claude Code' : ''); }
+      try { await adopt(address, spaceId, tabId, cwd, body.kind === 'fable' ? 'Fable' : body.kind === 'claude' ? 'Claude Code' : ''); }
       catch (e) { console.error('adopt', e.message); }
     }
     return send(res, 200, { ok: true, address, newSpace: !space });

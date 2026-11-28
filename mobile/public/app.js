@@ -1,6 +1,9 @@
 'use strict';
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// A Claude terminal's model (state: x.model, e.g. "fable", "opus", "claude-opus-5-5") as a family + a coloured tag.
+const modelFamily = (x) => { const m = String((x && x.model) || '').toLowerCase(); return ['fable', 'opus', 'sonnet', 'haiku'].find((f) => m.includes(f)) || (m ? 'other' : ''); };
+const modelTag = (x) => { const f = modelFamily(x); return f ? `<span class="mtag ${f}">${esc(f === 'other' ? x.model : f[0].toUpperCase() + f.slice(1))}</span>` : ''; };
 let state = { projects: [], spaces: [], other: [] };
 let ws, view = null, term = null;
 
@@ -39,7 +42,7 @@ async function api(path, body) {
 // ---- live state ----
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/events');
-  ws.onmessage = (e) => { state = JSON.parse(e.data); if (!term) render(); };
+  ws.onmessage = (e) => { state = JSON.parse(e.data); if (!term) render(); else if (view && view.kind === 't' && !isWide()) termHead(); };
   ws.onclose = () => setTimeout(connect, 1500);
 }
 connect();
@@ -68,7 +71,7 @@ function render() {
   if (view.kind === 'home') app.innerHTML = home();
   else if (view.kind === 'p') { if (!$('#fbranch') || !$('#cmsg') || app.dataset.v !== 'p' + view.id) { app.innerHTML = project(); app.dataset.v = 'p' + view.id; bind(app); enterProject(); return; } else updateProjectLive(); }
   else if (view.kind === 'o') { app.innerHTML = project(); app.dataset.v = 'o' + view.id; }
-  else if (view.kind === 't') { if (term && tAddr !== view.id) closeTerm(); if (!term) openTerm(view.id); return; }
+  else if (view.kind === 't') { if (term && tAddr !== view.id) closeTerm(); if (!term) openTerm(view.id); else termHead(); return; }
   else if (view.kind === 'add') { if (app.dataset.v !== 'add') { app.innerHTML = addView(); app.dataset.v = 'add'; enterAdd(); } return; }
   if (view.kind === 'home') app.dataset.v = 'home';
   bind(app);
@@ -105,7 +108,7 @@ function tabsHtml(spaces) {
       if (many) h += `<div class="tabline"><span>${esc(named ? t.name : 'Tab ' + t.index)}${udot(t.unread)}</span>${x}</div>`;
       for (const r of t.terminals) {
         const title = !many && named ? t.name : (r.app || r.program || r.address);
-        h += `<div class="trow${many ? ' in' : ''}" data-go="/t/${esc(r.address)}">${dot(r.status)}<div class="main"><div class="name${r.status === 'done' ? ' unread' : ''}">${esc(title)}${udot(r.status === 'done' ? 1 : 0)} <span class="addr">${esc(r.address)}</span></div><div class="sub">${esc(r.msg || r.title || '')}</div></div>${!many ? x : ''}</div>`;
+        h += `<div class="trow${many ? ' in' : ''}" data-go="/t/${esc(r.address)}">${dot(r.status)}<div class="main"><div class="name${r.status === 'done' ? ' unread' : ''}">${esc(title)} ${modelTag(r)}${udot(r.status === 'done' ? 1 : 0)} <span class="addr">${esc(r.address)}</span></div><div class="sub">${esc(r.msg || r.title || '')}</div></div>${!many ? x : ''}</div>`;
       }
       if (!t.terminals.length) h += `<div class="trow">${dot(t.status)}<div class="main"><div class="name">${esc(named ? t.name : 'Tab ' + t.index)}</div><div class="sub">no terminals</div></div>${x}</div>`;
     }
@@ -143,7 +146,7 @@ function project() {
   const sp = p.spaces.map(spaceById).filter(Boolean);
   return `<header class="bar"><button class="icon" data-go="/">‹</button><h1>${esc(p.name)}</h1><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>
   ${fold('branch', `${I_BRANCH}<span class="ft" id="pgit">${gitLine(p.git) || 'Branch'}</span>`, '<div id="branches" class="fbody">Loading...</div>')}
-  <div class="actions"><button class="primary" data-act="new" data-kind="claude">+ Claude</button><button data-act="new" data-kind="shell">+ Shell</button></div>
+  <div class="actions"><button class="primary" data-act="new" data-kind="claude">+ Claude</button><button class="fablebtn" data-act="new" data-kind="fable">+ Fable</button><button data-act="new" data-kind="shell">+ Shell</button></div>
   <div id="tabs">${p.open ? tabsHtml(sp) : '<div class="empty">No open space. The buttons create one.</div>'}</div>
   ${fold('changes', '<span class="ft">Changes</span><span class="pill" id="ccount"></span>',
     `<div id="changes"><div id="callrow"></div><div id="clist"><div class="cnote">Loading changes…</div></div>
@@ -339,15 +342,24 @@ function findOwner(addr) {
   for (const id of state.other) { const s = spaceById(id); if (s && s.tabs.some((t) => t.terminals.some((x) => x.address === addr))) return '/o/' + id; }
   return '/';
 }
+// The terminal screen's title: program + model tag (Fable tints the whole screen); redone on state pushes,
+// since a just-created terminal isn't in the state yet when the screen opens.
+function termHead() {
+  const ts = $('#ts'), h = $('#thead'); if (!ts || !h) return;
+  const info = state.spaces.flatMap((s) => s.tabs.flatMap((t) => t.terminals)).find((x) => x.address === tAddr);
+  const f = modelFamily(info), html = `${esc(info ? (info.app || info.program) + ' ' : '')}${modelTag(info)} <span class="sub">${esc(tAddr)}</span>`;
+  if (h.innerHTML !== html) h.innerHTML = html;
+  ts.className = 'termscreen' + (f ? ' m-' + f : '');
+}
 function openTerm(addr) {
   tAddr = addr; backHash = findOwner(addr);
-  const info = state.spaces.flatMap((s) => s.tabs.flatMap((t) => t.terminals)).find((x) => x.address === addr);
   $('#app').dataset.v = 't';
-  $('#app').innerHTML = `<div class="termscreen" id="ts"><header class="bar"><button class="icon" id="back">‹</button><h1>${esc(info ? (info.app || info.program) + ' ' : '')}<span class="sub">${esc(addr)}</span></h1><span id="tdot"></span><button class="icon" id="kbd" aria-label="Keyboard" title="Keyboard">${I_KBD}</button><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>
+  $('#app').innerHTML = `<div class="termscreen" id="ts"><header class="bar"><button class="icon" id="back">‹</button><h1 id="thead"></h1><span id="tdot"></span><button class="icon" id="kbd" aria-label="Keyboard" title="Keyboard">${I_KBD}</button><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>
   <div class="conn" id="conn">Disconnected. Tap to reconnect.</div>
   <div id="xt"></div>
   <div class="keys"><button data-k="\x1b">Esc</button><button data-k="\t">Tab</button><button id="kctrl">Ctrl</button><button data-k="\x03">^C</button><button id="kpaste">Paste</button><button data-k="\r">Enter</button></div>
   <div class="sendbox"><button class="micbtn attbtn" id="attbtn" aria-label="Attach image" title="Attach image">${I_CLIP}</button><input type="file" id="attfile" accept="image/*" multiple hidden><div class="sendwrap"><div id="sendtxt" class="ta" contenteditable="true" role="textbox" aria-multiline="true" data-ph="Reply (pasted + Enter)"></div><canvas id="wave" class="wave"></canvas><span class="wavemsg">Transcribing…</span></div><div class="sbtns"><button class="micbtn" id="micbtn" hidden aria-label="Dictate" title="Dictate">${I_MIC}</button><input type="file" id="micfile" accept="audio/*" capture hidden><button class="primary sendbtn" id="sendbtn" aria-label="Send" title="Send">${I_SEND}</button></div></div></div>`;
+  termHead();
   $('#back').onclick = () => (location.hash = backHash);
   term = new Terminal({ fontSize: 12.5, fontFamily: 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace', theme: isLight() ? XT_LIGHT : XT_DARK, scrollback: 3000, cursorBlink: false, allowProposedApi: true });
   fit = new FitAddon.FitAddon(); term.loadAddon(fit);

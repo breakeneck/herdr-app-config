@@ -115,10 +115,10 @@ function tabsBarHtml(spaces, act) {
   for (const s of spaces) for (const t of s.tabs) {
     const first = t.terminals.find(isAgent) || t.terminals[0];
     const name = t.name || (isAgent(first) ? progName(first) : String(t.index));
-    h += `<div class="tpill${act && act.t.id === t.id ? ' on' : ''}" data-act="wtab" data-t="${esc(t.id)}">${isAgent(first) ? I_AGENT : I_TERM}<span>${esc(name)}</span>${udot(t.unread)}${statusMark(t.status)}<button class="x" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" title="Close tab">×</button></div>`;
+    h += `<div class="tpill${act && act.t.id === t.id ? ' on' : ''}${isAgent(first) && modelFamily(first) === 'fable' ? ' m-fable' : ''}" data-act="wtab" data-t="${esc(t.id)}">${isAgent(first) ? I_AGENT : I_TERM}<span>${esc(name)}</span>${isAgent(first) && !new RegExp(modelFamily(first) || '^$', 'i').test(name) ? modelTag(first) : ''}${udot(t.unread)}${statusMark(t.status)}<button class="x" data-act="closetab" data-s="${esc(s.id)}" data-t="${esc(t.id)}" title="Close tab">×</button></div>`;
   }
   h += '<span class="flex"></span>';
-  if (p) h += `<div class="newwrap"><button class="ghost" data-act="wnew" title="New tab">＋</button><div class="newmenu" id="newmenu"><div data-act="new" data-kind="claude">${I_AGENT} Claude Code</div><div data-act="new" data-kind="shell">${I_TERM} Shell</div></div></div>`;
+  if (p) h += `<div class="newwrap"><button class="ghost" data-act="wnew" title="New tab">＋</button><div class="newmenu" id="newmenu"><div data-act="new" data-kind="claude">${I_AGENT} Claude Code</div><div data-act="new" data-kind="fable">${I_AGENT} Claude Code · <span class="mtag fable">Fable</span></div><div data-act="new" data-kind="shell">${I_TERM} Shell</div></div></div>`;
   if (p) h += `<button class="pill-btn${wpanelOn ? ' on' : ''}" id="wchanges" data-act="wpanel" title="Show or hide Changes">${I_BRANCH}Changes</button>`;
   return h;
 }
@@ -130,7 +130,7 @@ function layoutHtml(n) {
   return `<div class="tcard" style="${grow}" data-addr="${esc(n.t)}"><div class="chead"></div><div class="cbody"></div></div>`;
 }
 function cardHead(x) {
-  return `${isAgent(x) ? I_AGENT : I_TERM}<b>${esc(progName(x))}</b><span class="cwd">${esc(short(x.cwd))}</span><span class="flex"></span><span class="sub">${esc(x.msg || '')}</span>${statusMark(x.status)}<span class="addr">${esc(x.address)}</span>`;
+  return `${isAgent(x) ? I_AGENT : I_TERM}<b>${esc(progName(x))}</b>${modelTag(x)}<span class="cwd">${esc(short(x.cwd))}</span><span class="flex"></span><span class="sub">${esc(x.msg || '')}</span>${statusMark(x.status)}<span class="addr">${esc(x.address)}</span>`;
 }
 function statusHtml(p, spaces) {
   const terms = state.spaces.flatMap((s) => s.tabs.flatMap((t) => t.terminals)), agents = terms.filter(isAgent);
@@ -197,7 +197,7 @@ function renderWide() {
     wideSig = sig;
     if (!act) {
       panes.innerHTML = p ? `<div class="wempty">${tile(p.name)}<h2>${esc(p.name)}</h2><p class="sub">${esc(short(p.path))}</p><p>No open space for this project.</p>
-        <div class="actions" style="justify-content:center"><button class="primary" data-act="new" data-kind="claude">+ Claude Code</button><button data-act="new" data-kind="shell">+ Shell</button></div></div>`
+        <div class="actions" style="justify-content:center"><button class="primary" data-act="new" data-kind="claude">+ Claude Code</button><button class="fablebtn" data-act="new" data-kind="fable">+ Fable</button><button data-act="new" data-kind="shell">+ Shell</button></div></div>`
         : `<div class="wempty"><h2>${view.kind === 'o' ? 'Space closed' : 'Pick a space'}</h2></div>`;
       bind(panes);
     } else {
@@ -213,7 +213,7 @@ function renderWide() {
       const firstCard = panes.querySelector('.tcard[data-addr]'); if (firstCard) { firstCard.classList.add('focus'); setTimeout(() => { const v = tviews.get(firstCard.dataset.addr); v && v.term.focus(); }, 50); }
     }
   }
-  if (act) panes.querySelectorAll('.tcard[data-addr]').forEach((c) => { const x = act.t.terminals.find((y) => y.address === c.dataset.addr); c.querySelector('.chead').innerHTML = x ? cardHead(x) : `<span class="sub">${esc(c.dataset.addr)} · ended</span>`; });
+  if (act) panes.querySelectorAll('.tcard[data-addr]').forEach((c) => { const x = act.t.terminals.find((y) => y.address === c.dataset.addr); c.classList.toggle('m-fable', modelFamily(x) === 'fable'); c.querySelector('.chead').innerHTML = x ? cardHead(x) : `<span class="sub">${esc(c.dataset.addr)} · ended</span>`; });
 
   // The right panel: the project's Changes (Tasks / PR / AI open as popups from its header).
   const panel = $('#wpanel');
