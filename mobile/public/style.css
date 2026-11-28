@@ -334,3 +334,10 @@ details.fold[open]>summary{background:var(--raised)}
 .tcard.m-fable .chead{box-shadow:inset 0 -2px 0 var(--fable)}
 .tpill.m-fable.on{border-color:var(--fable)}
 button.fablebtn{border-color:var(--fable);color:var(--fable)}
+/* Terminal screen title: program line + the chat's title under it */
+.termscreen header.bar h1{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+.termscreen header.bar h1 .tl1,.termscreen header.bar h1 .tl2{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.termscreen header.bar h1 .tl2{font-size:12px;font-weight:400;color:var(--muted)}
+/* Send tapped while dictating: stop, transcribe, send; everything else waits */
+.termscreen.sending .keys button,.termscreen.sending #micbtn,.termscreen.sending #attbtn{pointer-events:none;opacity:.4}
+.termscreen.sending .micbtn.rec,.termscreen.sending .micbtn.busy{animation:none}

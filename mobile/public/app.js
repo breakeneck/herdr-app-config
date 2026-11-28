@@ -332,7 +332,7 @@ const acts = {
 // ---- terminal screen ----
 let tws, fit, ctrl = false, tAddr, backHash = '/';
 function closeTerm() {
-  flushReplyDraft();
+  flushReplyDraft(); micSend = false; micBusy = false;
   if (tws) { tws.onclose = null; try { tws.close(); } catch {} tws = null; }
   if (term) { term.dispose(); term = null; }
   document.body.style.height = '';
@@ -347,8 +347,11 @@ function findOwner(addr) {
 function termHead() {
   const ts = $('#ts'), h = $('#thead'); if (!ts || !h) return;
   const info = state.spaces.flatMap((s) => s.tabs.flatMap((t) => t.terminals)).find((x) => x.address === tAddr);
-  const f = modelFamily(info), html = `${esc(info ? (info.app || info.program) + ' ' : '')}${modelTag(info)} <span class="sub">${esc(tAddr)}</span>`;
+  // Second line: the chat's title, as in the list (the agent's status message, else the terminal title).
+  const sub = info ? info.msg || info.title || '' : '';
+  const f = modelFamily(info), html = `<span class="tl1">${esc(info ? (info.app || info.program) + ' ' : '')}${modelTag(info)} <span class="sub">${esc(tAddr)}</span></span>${sub ? `<span class="tl2">${esc(sub)}</span>` : ''}`;
   if (h.innerHTML !== html) h.innerHTML = html;
+  const ub = $('#kusage'); if (ub) ub.hidden = !(info && (info.app === 'claude-code' || info.model));
   ts.className = 'termscreen' + (f ? ' m-' + f : '');
 }
 function openTerm(addr) {
@@ -357,7 +360,7 @@ function openTerm(addr) {
   $('#app').innerHTML = `<div class="termscreen" id="ts"><header class="bar"><button class="icon" id="back">‹</button><h1 id="thead"></h1><span id="tdot"></span><button class="icon" id="kbd" aria-label="Keyboard" title="Keyboard">${I_KBD}</button><button class="icon" data-act="reload" aria-label="Refresh" title="Refresh">⟳</button></header>
   <div class="conn" id="conn">Disconnected. Tap to reconnect.</div>
   <div id="xt"></div>
-  <div class="keys"><button data-k="esc">Esc</button><button data-k="tab">Tab</button><button id="kctrl">Ctrl</button><button data-k="ctrlc">^C</button><button id="kpaste">Paste</button><button data-k="enter">Enter</button></div>
+  <div class="keys"><button data-k="esc">Esc</button><button data-k="tab">Tab</button><button id="kctrl">Ctrl</button><button data-k="ctrlc">^C</button><button id="kpaste">Paste</button><button id="kusage" hidden>Usage</button><button data-k="enter">Enter</button></div>
   <div class="sendbox"><button class="micbtn attbtn" id="attbtn" aria-label="Attach image" title="Attach image">${I_CLIP}</button><input type="file" id="attfile" accept="image/*" multiple hidden><div class="sendwrap"><div id="sendtxt" class="ta" contenteditable="true" role="textbox" aria-multiline="true" data-ph="Reply (pasted + Enter)"></div><canvas id="wave" class="wave"></canvas><span class="wavemsg">Transcribing…</span></div><div class="sbtns"><button class="micbtn" id="micbtn" hidden aria-label="Dictate" title="Dictate">${I_MIC}</button><input type="file" id="micfile" accept="audio/*" capture hidden><button class="primary sendbtn" id="sendbtn" aria-label="Send" title="Send">${I_SEND}</button></div></div></div>`;
   termHead();
   $('#back').onclick = () => (location.hash = backHash);
@@ -388,9 +391,16 @@ function openTerm(addr) {
     tsend({ t: 'i', d });
   });
   term.onResize(({ cols, rows }) => tsend({ t: 'r', cols, rows }));
-  document.querySelectorAll('.keys [data-k]').forEach((b) => (b.onpointerdown = (e) => { e.preventDefault(); tsend({ t: 'i', d: KEYS[b.dataset.k] }); }));
+  document.querySelectorAll('.keys [data-k]').forEach((b) => (b.onpointerdown = (e) => { e.preventDefault(); tsend({ t: 'i', d: KEYS[b.dataset.k] }); if (b.dataset.k === 'esc') setUsage(false); }));
+  // Usage: Claude Code's /usage panel; a second tap closes it with Esc.
+  setUsage(false);
+  $('#kusage').onpointerdown = (e) => {
+    e.preventDefault();
+    if (usageOn) { tsend({ t: 'i', d: KEYS.esc }); setUsage(false); return; }
+    tsend({ t: 'i', d: '/usage' }); setTimeout(() => tsend({ t: 'i', d: KEYS.enter }), 150); setUsage(true);
+  };
   $('#kctrl').onpointerdown = (e) => { e.preventDefault(); setCtrl(!ctrl); };
-  $('#sendbtn').onclick = sendText;
+  $('#sendbtn').onclick = sendTap;
   setupReplyBox($('#sendtxt'));
   loadReplyDraft(addr);
   setupMic();
@@ -437,6 +447,8 @@ async function pasteClip() {
 let termRefresh = null;
 // The key row's bytes (by name: a raw ESC in an attribute broke JSON.parse, so no key was ever sent).
 const KEYS = { esc: '\x1b', tab: '\t', ctrlc: '\x03', enter: '\r' };
+let usageOn = false;
+function setUsage(v) { usageOn = v; const b = $('#kusage'); if (b) b.className = v ? 'on' : ''; }
 function setCtrl(v) { ctrl = v; const b = $('#kctrl'); if (b) b.className = v ? 'on' : ''; }
 function tsend(m) { if (tws && tws.readyState === 1) tws.send(JSON.stringify(m)); }
 function attach() {
@@ -448,8 +460,21 @@ function attach() {
   mine.onmessage = (e) => term && term.write(e.data);
   mine.onclose = () => { if (tws === mine && $('#conn')) $('#conn').className = 'conn on'; };
 }
-async function sendText() {
-  const ta = $('#sendtxt'), b = $('#sendbtn'); const text = ta.value; if (!text.trim() || b.classList.contains('busy')) return;
+// Send while dictating (as in Claude Code): stop the mic, transcribe, then send; the screen is locked meanwhile.
+function sendTap() {
+  if (micSend) return;
+  if (micRec) { sendLock(true); micRec.stop(); return; }
+  if (micBusy) { sendLock(true); return; } // already transcribing: send once the text is in
+  sendText();
+}
+function sendLock(on) {
+  micSend = on;
+  const ts = $('#ts'), b = $('#sendbtn');
+  if (ts) ts.classList.toggle('sending', on);
+  if (b) { b.classList.toggle('busy', on); b.disabled = on; }
+}
+async function sendText(locked) {
+  const ta = $('#sendtxt'), b = $('#sendbtn'); const text = ta.value; if (!text.trim() || (!locked && b.classList.contains('busy'))) return;
   b.classList.add('busy'); b.disabled = true;
   let r; try { r = await api('/api/send', { terminal: tAddr, text }); } catch (e) { r = { error: e.message }; }
   b.classList.remove('busy'); b.disabled = false;
@@ -530,7 +555,7 @@ function sizeReply(ta) {
 // Tap = start, tap again = stop. While recording the reply box is disabled and shows a live waveform;
 // while transcribing it shows "Transcribing…". Live recording needs a secure context (https/localhost);
 // over plain http the mic opens the phone's own recorder through a file input instead.
-let micRec = null, micOn = null, micStarting = false, micHttps = 0;
+let micRec = null, micOn = null, micStarting = false, micHttps = 0, micBusy = false, micSend = false;
 function micState(st) { // '' | 'rec' | 'busy'
   const box = $('#ts .sendbox'), ta = $('#sendtxt'), b = $('#micbtn');
   if (box) { box.classList.toggle('rec', st === 'rec'); box.classList.toggle('busy', st === 'busy'); }
@@ -578,6 +603,7 @@ async function setupMic() {
       stream.getTracks().forEach((t) => t.stop()); stopWave();
       micRec = null; micState('');
       if (!discard && parts.length) transcribe(new Blob(parts, { type: rec.mimeType || type || 'audio/webm' }));
+      else sendLock(false);
     };
     // Leaving the terminal screen mid-recording drops the recording.
     rec.abandon = () => { discard = true; try { rec.stop(); } catch {} };
@@ -617,15 +643,20 @@ function waveform(stream, cv) {
   return () => { cancelAnimationFrame(raf); try { ctx && ctx.close(); } catch {} if (cv && cv.isConnected) cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); };
 }
 async function transcribe(blob) {
-  micState('busy');
+  micState('busy'); micBusy = true;
   let j;
   try { const r = await fetch('/api/asr', { method: 'POST', headers: { 'content-type': blob.type || 'audio/webm' }, body: blob }); j = await r.json().catch(() => ({ error: 'HTTP ' + r.status })); }
   catch (e) { j = { error: e.message }; }
-  micState('');
-  if (j.error) return toast(j.error);
-  const ta = $('#sendtxt'); if (!ta || !j.text) return j.text ? null : toast('Nothing recognized');
-  ta.value = ta.value && !/\s$/.test(ta.value) ? ta.value + ' ' + j.text : ta.value + j.text;
-  ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus();
+  micState(''); micBusy = false;
+  const send = micSend;
+  if (j.error) { sendLock(false); return toast(j.error); }
+  const ta = $('#sendtxt'); if (!ta) return sendLock(false);
+  if (j.text) {
+    ta.value = ta.value && !/\s$/.test(ta.value) ? ta.value + ' ' + j.text : ta.value + j.text;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  } else toast('Nothing recognized');
+  // Send tapped mid-dictation: send what the box holds now (typed text is sent even if nothing was heard).
+  if (send) { await sendText(true); sendLock(false); } else if (j.text) ta.focus();
 }
 document.addEventListener('input', (e) => { if (e.target.id === 'sendtxt') { sizeReply(e.target); replyDraftChanged(e.target.value); } });
 route();
